@@ -28,6 +28,7 @@ if [ -f /etc/mailinabox.conf ]; then
 	# Run any system migrations before proceeding. Since this is a second run,
 	# we assume we have Python already installed.
 	setup/migrate.py --migrate
+	exit 0
 
 	# Load the old .conf file to get existing configuration options loaded
 	# into variables with a DEFAULT_ prefix.
@@ -99,7 +100,7 @@ if [ -z "$STORAGE_ROOT" ]; then
 	STORAGE_ROOT=/home/$STORAGE_USER
 	mkdir -p $STORAGE_ROOT
 	echo $(setup/migrate.py --current) > $STORAGE_ROOT/mailinabox.version
-	chown $STORAGE_USER.$STORAGE_USER $STORAGE_ROOT/mailinabox.version
+	chown $STORAGE_USER:$STORAGE_USER $STORAGE_ROOT/mailinabox.version
 fi
 
 # Save the global options in /etc/mailinabox.conf so that standalone
@@ -131,7 +132,8 @@ source setup/zpush.sh
 source setup/management.sh
 
 # Write the DNS and nginx configuration files.
-sleep 5 # wait for the daemon to start
+sleep 10 # wait for the daemon to start
+
 curl -s -d POSTDATA --user $(</var/lib/mailinabox/api.key): http://127.0.0.1:10222/dns/update
 curl -s -d POSTDATA --user $(</var/lib/mailinabox/api.key): http://127.0.0.1:10222/web/update
 

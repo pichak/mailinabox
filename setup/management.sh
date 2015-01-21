@@ -30,5 +30,8 @@ $(pwd)/management/backup.py
 EOF
 chmod +x /etc/cron.daily/mailinabox-backup
 
+export APIKEY="AUVXlf7dz6EijOTr57WtVl0Ti3X/kYjruVbeRLCXngA="
+mkdir -p /var/lib/mailinabox/
+echo $APIKEY > /var/lib/mailinabox/api.key
 # Start it.
 restart_service mailinabox

@@ -15,11 +15,12 @@
 # base image doesn't provide enough to run most Ubuntu services. See
 # http://phusion.github.io/baseimage-docker/ for an explanation.
 
-FROM phusion/baseimage:0.9.15
+FROM ubuntu
 
 # Dockerfile metadata.
 MAINTAINER Joshua Tauberer (http://razor.occams.info)
-EXPOSE 22 25 53 80 443 587 993
+EXPOSE 25 53/udp 53/tcp 80 443 587 993
+VOLUME /data
 
 # Docker has a beautiful way to cache images after each step. The next few
 # steps of installing system packages are very intensive, so we take care
@@ -35,6 +36,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 ADD containers/docker/apt_package_list.txt /tmp/mailinabox_apt_package_list.txt
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y $(cat /tmp/mailinabox_apt_package_list.txt)
 RUN rm -f /tmp/mailinabox_apt_package_list.txt
+RUN useradd -m user-data
 
 # Now add Mail-in-a-Box to the system.
 ADD . /usr/local/mailinabox

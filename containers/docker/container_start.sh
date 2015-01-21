@@ -18,13 +18,17 @@ if [ ! -t 0 ]; then
 fi
 
 # Start configuration.
+rsyslogd
+
 cd /usr/local/mailinabox
 export IS_DOCKER=1
+export STORAGE_ROOT=/data
+export STORAGE_USER=user-data
 export DISABLE_FIREWALL=1
 source setup/start.sh # using 'source' means an exit from inside also exits this script and terminates container
 
-# Once the configuration is complete, start the Unix init process
-# provided by the base image. We're running as process 0, and
-# /sbin/my_init needs to run as process 0, so use 'exec' to replace
-# this shell process and not fork a new one. Nifty right?
-exec /sbin/my_init -- bash
+/etc/init.d/postgrey start
+/etc/init.d/memcached start
+/etc/init.d/fail2ban start
+killall dovecot
+dovecot -F -c /etc/dovecot/dovecot.conf &> /var/log/dovecot.log

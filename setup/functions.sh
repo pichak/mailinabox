@@ -169,7 +169,7 @@ function restart_service {
 			killall dovecot
 			dovecot -c /etc/dovecot/dovecot.conf
 		else
-	 		hide_output /etc/init.d/$1 restart
+	 		hide_output /etc/init.d/$1 restart || /etc/init.d/$1 abort && /etc/init.d/$1 start
 	 	fi
 	fi
 }

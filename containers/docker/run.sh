@@ -17,7 +17,7 @@
 # volume if the volume is new.
 
 
-DOCKER=docker.io
+DOCKER=docker
 
 # Build or rebuild the image.
 # Rebuilds are very fast.
@@ -43,7 +43,7 @@ fi
 # Start container.
 echo Starting new container...
 $DOCKER run \
-	-p 25 -p 53 -p 80 -p 443 -p 587 -p 993 \
+	-p 25 -p 53/udp -p 53/tcp -p 80 -p 443 -p 587 -p 993 \
 	--volumes-from mailinabox-userdata \
 	--name mailinabox-services \
 	-t -i \
