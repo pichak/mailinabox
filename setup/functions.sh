@@ -167,7 +167,7 @@ function restart_service {
 			# an upstart init configuration. But Docker doesn't provide
 			# upstart. Start Dovecot specially.
 			killall dovecot
-			dovecot -c /etc/dovecot/dovecot.conf
+			#dovecot -c /etc/dovecot/dovecot.conf
 		else
 	 		hide_output /etc/init.d/$1 restart || /etc/init.d/$1 abort && /etc/init.d/$1 start
 	 	fi
