@@ -27,8 +27,4 @@ export STORAGE_USER=user-data
 export DISABLE_FIREWALL=1
 source setup/start.sh # using 'source' means an exit from inside also exits this script and terminates container
 
-/etc/init.d/postgrey start
-/etc/init.d/memcached start
-/etc/init.d/fail2ban start
-killall dovecot
-dovecot -F -c /etc/dovecot/dovecot.conf &> /var/log/dovecot.log
+exec /sbin/my_init -- bash

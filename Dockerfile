@@ -15,7 +15,8 @@
 # base image doesn't provide enough to run most Ubuntu services. See
 # http://phusion.github.io/baseimage-docker/ for an explanation.
 
-FROM ubuntu
+#FROM ubuntu
+FROM phusion/baseimage
 
 # Dockerfile metadata.
 MAINTAINER Joshua Tauberer (http://razor.occams.info)
