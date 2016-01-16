@@ -41,7 +41,15 @@ source /etc/mailinabox.conf # load global vars
 #   always will.
 # * `ca-certificates`: A trust store used to squelch postfix warnings about
 #   untrusted opportunistically-encrypted connections.
+#
+# postgrey is going to come in via the Mail-in-a-Box PPA, which publishes
+# a modified version of postgrey that lets senders whitelisted by dnswl.org
+# pass through without being greylisted. So please note [dnswl's license terms](https://www.dnswl.org/?page_id=9):
+# > Every user with more than 100’000 queries per day on the public nameserver
+# > infrastructure and every commercial vendor of dnswl.org data (eg through
+# > anti-spam solutions) must register with dnswl.org and purchase a subscription.
 
+echo "Installing Postfix (SMTP server)..."
 apt_install postfix postfix-pcre postgrey ca-certificates
 
 # ### Basic Settings
@@ -62,6 +70,11 @@ tools/editconf.py /etc/postfix/main.cf \
 
 # Enable the 'submission' port 587 smtpd server and tweak its settings.
 #
+# * Do not add the OpenDMAC Authentication-Results header. That should only be added
+#   on incoming mail. Omit the OpenDMARC milter by re-setting smtpd_milters to the
+#   OpenDKIM milter only. See dkim.sh.
+# * Even though we dont allow auth over non-TLS connections (smtpd_tls_auth_only below, and without auth the client cant
+#   send outbound mail), don't allow non-TLS mail submission on this port anyway to prevent accidental misconfiguration.
 # * Require the best ciphers for incoming connections per http://baldric.net/2013/12/07/tls-ciphers-in-postfix-and-dovecot/.
 #   By putting this setting here we leave opportunistic TLS on incoming mail at default cipher settings (any cipher is better than none).
 # * Give it a different name in syslog to distinguish it from the port 25 smtpd server.
@@ -71,13 +84,21 @@ tools/editconf.py /etc/postfix/main.cf \
 tools/editconf.py /etc/postfix/master.cf -s -w \
 	"submission=inet n       -       -       -       -       smtpd
 	  -o syslog_name=postfix/submission
-	  -o smtpd_tls_ciphers=high -o smtpd_tls_protocols=!SSLv2,!SSLv3
+	  -o smtpd_milters=inet:127.0.0.1:8891
+	  -o smtpd_tls_security_level=encrypt
+	  -o smtpd_tls_ciphers=high -o smtpd_tls_exclude_ciphers=aNULL,DES,3DES,MD5,DES+MD5,RC4 -o smtpd_tls_mandatory_protocols=!SSLv2,!SSLv3
 	  -o cleanup_service_name=authclean" \
 	"authclean=unix  n       -       -       -       0       cleanup
 	  -o header_checks=pcre:/etc/postfix/outgoing_mail_header_filters"
 
 # Install the `outgoing_mail_header_filters` file required by the new 'authclean' service.
 cp conf/postfix_outgoing_mail_header_filters /etc/postfix/outgoing_mail_header_filters
+
+# Modify the `outgoing_mail_header_filters` file to use the local machine name and ip 
+# on the first received header line.  This may help reduce the spam score of email by
+# removing the 127.0.0.1 reference.
+sed -i "s/PRIMARY_HOSTNAME/$PRIMARY_HOSTNAME/" /etc/postfix/outgoing_mail_header_filters
+sed -i "s/PUBLIC_IP/$PUBLIC_IP/" /etc/postfix/outgoing_mail_header_filters
 
 # Enable TLS on these and all other connections (i.e. ports 25 *and* 587) and
 # require TLS before a user is allowed to authenticate. This also makes
@@ -90,6 +111,8 @@ tools/editconf.py /etc/postfix/main.cf \
 	smtpd_tls_cert_file=$STORAGE_ROOT/ssl/ssl_certificate.pem \
 	smtpd_tls_key_file=$STORAGE_ROOT/ssl/ssl_private_key.pem \
 	smtpd_tls_dh1024_param_file=$STORAGE_ROOT/ssl/dh2048.pem \
+	smtpd_tls_ciphers=medium \
+	smtpd_tls_exclude_ciphers=aNULL \
 	smtpd_tls_received_header=yes
 
 # Prevent non-authenticated users from sending mail that requires being
@@ -144,6 +167,7 @@ tools/editconf.py /etc/postfix/main.cf virtual_transport=lmtp:[127.0.0.1]:10025
 #
 # * `reject_non_fqdn_sender`: Reject not-nice-looking return paths.
 # * `reject_unknown_sender_domain`: Reject return paths with invalid domains.
+# * `reject_authenticated_sender_login_mismatch`: Reject if mail FROM address does not match the client SASL login
 # * `reject_rhsbl_sender`: Reject return paths that use blacklisted domains.
 # * `permit_sasl_authenticated`: Authenticated users (i.e. on port 587) can skip further checks.
 # * `permit_mynetworks`: Mail that originates locally can skip further checks.
@@ -157,13 +181,18 @@ tools/editconf.py /etc/postfix/main.cf virtual_transport=lmtp:[127.0.0.1]:10025
 # whitelisted) then postfix does a DEFER_IF_REJECT, which results in all "unknown user" sorts of messages turning into #NODOC
 # "450 4.7.1 Client host rejected: Service unavailable". This is a retry code, so the mail doesn't properly bounce. #NODOC
 tools/editconf.py /etc/postfix/main.cf \
-	smtpd_sender_restrictions="reject_non_fqdn_sender,reject_unknown_sender_domain,reject_rhsbl_sender dbl.spamhaus.org" \
+	smtpd_sender_restrictions="reject_non_fqdn_sender,reject_unknown_sender_domain,reject_authenticated_sender_login_mismatch,reject_rhsbl_sender dbl.spamhaus.org" \
 	smtpd_recipient_restrictions=permit_sasl_authenticated,permit_mynetworks,"reject_rbl_client zen.spamhaus.org",reject_unlisted_recipient,"check_policy_service inet:127.0.0.1:10023"
 
 # Postfix connects to Postgrey on the 127.0.0.1 interface specifically. Ensure that
 # Postgrey listens on the same interface (and not IPv6, for instance).
+# A lot of legit mail servers try to resend before 300 seconds.
+# As a matter of fact RFC is not strict about retry timer so postfix and
+# other MTA have their own intervals. To fix the problem of receiving
+# e-mails really latter, delay of greylisting has been set to
+# 180 seconds (default is 300 seconds).
 tools/editconf.py /etc/default/postgrey \
-	POSTGREY_OPTS=\"--inet=127.0.0.1:10023\"
+	POSTGREY_OPTS=\"'--inet=127.0.0.1:10023 --delay=180'\"
 
 # Increase the message size limit from 10MB to 128MB.
 # The same limit is specified in nginx.conf for mail submitted via webmail and Z-Push.
@@ -178,3 +207,4 @@ ufw_allow submission
 # Restart services
 
 restart_service postfix
+restart_service postgrey

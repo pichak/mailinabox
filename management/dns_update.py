@@ -4,7 +4,7 @@
 # and mail aliases and restarts nsd.
 ########################################################################
 
-import os, os.path, urllib.parse, datetime, re, hashlib, base64
+import sys, os, os.path, urllib.parse, datetime, re, hashlib, base64
 import ipaddress
 import rtyaml
 import dns.resolver
@@ -24,7 +24,7 @@ def get_dns_zones(env):
 	# What domains should we create DNS zones for? Never create a zone for
 	# a domain & a subdomain of that domain.
 	domains = get_dns_domains(env)
-	
+
 	# Exclude domains that are subdomains of other domains we know. Proceed
 	# by looking at shorter domains first.
 	zone_domains = set()
@@ -49,46 +49,21 @@ def get_dns_zones(env):
 	zonefiles.sort(key = lambda zone : zone_order.index(zone[0]) )
 
 	return zonefiles
-	
-def get_custom_dns_config(env):
-	try:
-		return rtyaml.load(open(os.path.join(env['STORAGE_ROOT'], 'dns/custom.yaml')))
-	except:
-		return { }
-
-def write_custom_dns_config(config, env):
-	config_yaml = rtyaml.dump(config)
-	with open(os.path.join(env['STORAGE_ROOT'], 'dns/custom.yaml'), "w") as f:
-		f.write(config_yaml)
 
 def do_dns_update(env, force=False):
-	# What domains (and their zone filenames) should we build?
-	domains = get_dns_domains(env)
-	zonefiles = get_dns_zones(env)
-
-	# Custom records to add to zones.
-	additional_records = get_custom_dns_config(env)
-
 	# Write zone files.
 	os.makedirs('/etc/nsd/zones', exist_ok=True)
+	zonefiles = []
 	updated_domains = []
-	for i, (domain, zonefile) in enumerate(zonefiles):
-		# Build the records to put in the zone.
-		records = build_zone(domain, domains, additional_records, env)
+	for (domain, zonefile, records) in build_zones(env):
+		# The final set of files will be signed.
+		zonefiles.append((domain, zonefile + ".signed"))
 
 		# See if the zone has changed, and if so update the serial number
 		# and write the zone file.
 		if not write_nsd_zone(domain, "/etc/nsd/zones/" + zonefile, records, env, force):
 			# Zone was not updated. There were no changes.
 			continue
-
-		# If this is a .justtesting.email domain, then post the update.
-		try:
-			justtestingdotemail(domain, records)
-		except:
-			# Hmm. Might be a network issue. If we stop now, will we end
-			# up in an inconsistent state? Let's just continue.
-			pass
 
 		# Mark that we just updated this domain.
 		updated_domains.append(domain)
@@ -104,14 +79,8 @@ def do_dns_update(env, force=False):
 		# and return True so we get a chance to re-sign it.
 		sign_zone(domain, zonefile, env)
 
-	# Now that all zones are signed (some might not have changed and so didn't
-	# just get signed now, but were before) update the zone filename so nsd.conf
-	# uses the signed file.
-	for i in range(len(zonefiles)):
-		zonefiles[i][1] += ".signed"
-
 	# Write the main nsd.conf file.
-	if write_nsd_conf(zonefiles, additional_records, env):
+	if write_nsd_conf(zonefiles, list(get_custom_dns_config(env)), env):
 		# Make sure updated_domains contains *something* if we wrote an updated
 		# nsd.conf so that we know to restart nsd.
 		if len(updated_domains) == 0:
@@ -121,13 +90,17 @@ def do_dns_update(env, force=False):
 	if len(updated_domains) > 0:
 		shell('check_call', ["/usr/sbin/service", "nsd", "restart"])
 
-	# Write the OpenDKIM configuration tables.
-	if write_opendkim_tables(zonefiles, env):
+	# Write the OpenDKIM configuration tables for all of the domains.
+	if write_opendkim_tables([domain for domain, zonefile in zonefiles], env):
 		# Settings changed. Kick opendkim.
 		shell('check_call', ["/usr/sbin/service", "opendkim", "restart"])
 		if len(updated_domains) == 0:
 			# If this is the only thing that changed?
 			updated_domains.append("OpenDKIM configuration")
+
+	# Clear bind9's DNS cache so our own DNS resolver is up to date.
+	# (ignore errors with trap=True)
+	shell('check_call', ["/usr/sbin/rndc", "flush"], trap=True)
 
 	if len(updated_domains) == 0:
 		# if nothing was updated (except maybe OpenDKIM's files), don't show any output
@@ -137,7 +110,23 @@ def do_dns_update(env, force=False):
 
 ########################################################################
 
-def build_zone(domain, all_domains, additional_records, env, is_zone=True):
+def build_zones(env):
+	# What domains (and their zone filenames) should we build?
+	domains = get_dns_domains(env)
+	zonefiles = get_dns_zones(env)
+
+	# Custom records to add to zones.
+	additional_records = list(get_custom_dns_config(env))
+	from web_update import get_web_domains
+	www_redirect_domains = set(get_web_domains(env)) - set(get_web_domains(env, include_www_redirects=False))
+
+	# Build DNS records for each zone.
+	for domain, zonefile in zonefiles:
+		# Build the records to put in the zone.
+		records = build_zone(domain, domains, additional_records, www_redirect_domains, env)
+		yield (domain, zonefile, records)
+
+def build_zone(domain, all_domains, additional_records, www_redirect_domains, env, is_zone=True):
 	records = []
 
 	# For top-level zones, define the authoritative name servers.
@@ -153,8 +142,11 @@ def build_zone(domain, all_domains, additional_records, env, is_zone=True):
 		records.append((None,  "NS",  "ns1.%s." % env["PRIMARY_HOSTNAME"], False))
 
 		# Define ns2.PRIMARY_HOSTNAME or whatever the user overrides.
-		secondary_ns = additional_records.get("_secondary_nameserver", "ns2." + env["PRIMARY_HOSTNAME"])
-		records.append((None,  "NS", secondary_ns+'.', False))
+		# User may provide one or more additional nameservers
+		secondary_ns_list = get_secondary_dns(additional_records, mode="NS") \
+			or ["ns2." + env["PRIMARY_HOSTNAME"]] 
+		for secondary_ns in secondary_ns_list:
+			records.append((None,  "NS", secondary_ns+'.', False))
 
 
 	# In PRIMARY_HOSTNAME...
@@ -176,6 +168,9 @@ def build_zone(domain, all_domains, additional_records, env, is_zone=True):
 		# Add a DANE TLSA record for SMTP.
 		records.append(("_25._tcp", "TLSA", build_tlsa_record(env), "Recommended when DNSSEC is enabled. Advertises to mail servers connecting to the box that mandatory encryption should be used."))
 
+		# Add a DANE TLSA record for HTTPS, which some browser extensions might make use of.
+		records.append(("_443._tcp", "TLSA", build_tlsa_record(env), "Optional. When DNSSEC is enabled, provides out-of-band HTTPS certificate validation for a few web clients that support it."))
+
 		# Add a SSHFP records to help SSH key validation. One per available SSH key on this system.
 		for value in build_sshfp_records():
 			records.append((None, "SSHFP", value, "Optional. Provides an out-of-band method for verifying an SSH key before connecting. Use 'VerifyHostKeyDNS yes' (or 'VerifyHostKeyDNS ask') when connecting with ssh."))
@@ -183,16 +178,12 @@ def build_zone(domain, all_domains, additional_records, env, is_zone=True):
 	# The MX record says where email for the domain should be delivered: Here!
 	records.append((None,  "MX",  "10 %s." % env["PRIMARY_HOSTNAME"], "Required. Specifies the hostname (and priority) of the machine that handles @%s mail." % domain))
 
-	# SPF record: Permit the box ('mx', see above) to send mail on behalf of
-	# the domain, and no one else.
-	records.append((None,  "TXT", 'v=spf1 mx -all', "Recommended. Specifies that only the box is permitted to send @%s mail." % domain))
-
 	# Add DNS records for any subdomains of this domain. We should not have a zone for
 	# both a domain and one of its subdomains.
 	subdomains = [d for d in all_domains if d.endswith("." + domain)]
 	for subdomain in subdomains:
 		subdomain_qname = subdomain[0:-len("." + domain)]
-		subzone = build_zone(subdomain, [], additional_records, env, is_zone=False)
+		subzone = build_zone(subdomain, [], additional_records, www_redirect_domains, env, is_zone=False)
 		for child_qname, child_rtype, child_value, child_explanation in subzone:
 			if child_qname == None:
 				child_qname = subdomain_qname
@@ -200,50 +191,88 @@ def build_zone(domain, all_domains, additional_records, env, is_zone=True):
 				child_qname += "." + subdomain_qname
 			records.append((child_qname, child_rtype, child_value, child_explanation))
 
+	has_rec_base = list(records) # clone current state
 	def has_rec(qname, rtype, prefix=None):
-		for rec in records:
+		for rec in has_rec_base:
 			if rec[0] == qname and rec[1] == rtype and (prefix is None or rec[2].startswith(prefix)):
 				return True
 		return False
 
 	# The user may set other records that don't conflict with our settings.
-	for qname, rtype, value in get_custom_records(domain, additional_records, env):
+	# Don't put any TXT records above this line, or it'll prevent any custom TXT records.
+	for qname, rtype, value in filter_custom_records(domain, additional_records):
+		# Don't allow custom records for record types that override anything above.
+		# But allow multiple custom records for the same rtype --- see how has_rec_base is used.
 		if has_rec(qname, rtype): continue
+
+		# The "local" keyword on A/AAAA records are short-hand for our own IP.
+		# This also flags for web configuration that the user wants a website here.
+		if rtype == "A" and value == "local":
+			value = env["PUBLIC_IP"]
+		if rtype == "AAAA" and value == "local":
+			if "PUBLIC_IPV6" in env:
+				value = env["PUBLIC_IPV6"]
+			else:
+				continue
 		records.append((qname, rtype, value, "(Set by user.)"))
 
 	# Add defaults if not overridden by the user's custom settings (and not otherwise configured).
-	# Any "CNAME" record on the qname overrides A and AAAA.
+	# Any CNAME or A record on the qname overrides A and AAAA. But when we set the default A record,
+	# we should not cause the default AAAA record to be skipped because it thinks a custom A record
+	# was set. So set has_rec_base to a clone of the current set of DNS settings, and don't update
+	# during this process.
+	has_rec_base = list(records)
 	defaults = [
 		(None,  "A",    env["PUBLIC_IP"],       "Required. May have a different value. Sets the IP address that %s resolves to for web hosting and other services besides mail. The A record must be present but its value does not affect mail delivery." % domain),
-		("www", "A",    env["PUBLIC_IP"],       "Optional. Sets the IP address that www.%s resolves to, e.g. for web hosting." % domain),
 		(None,  "AAAA", env.get('PUBLIC_IPV6'), "Optional. Sets the IPv6 address that %s resolves to, e.g. for web hosting. (It is not necessary for receiving mail on this domain.)" % domain),
-		("www", "AAAA", env.get('PUBLIC_IPV6'), "Optional. Sets the IPv6 address that www.%s resolves to, e.g. for web hosting." % domain),
 	]
+	if "www." + domain in www_redirect_domains:
+		defaults += [
+			("www", "A",    env["PUBLIC_IP"],       "Optional. Sets the IP address that www.%s resolves to so that the box can provide a redirect to the parent domain." % domain),
+			("www", "AAAA", env.get('PUBLIC_IPV6'), "Optional. Sets the IPv6 address that www.%s resolves to so that the box can provide a redirect to the parent domain." % domain),
+		]
 	for qname, rtype, value, explanation in defaults:
 		if value is None or value.strip() == "": continue # skip IPV6 if not set
 		if not is_zone and qname == "www": continue # don't create any default 'www' subdomains on what are themselves subdomains
-		if not has_rec(qname, rtype) and not has_rec(qname, "CNAME"):
+		# Set the default record, but not if:
+		# (1) there is not a user-set record of the same type already
+		# (2) there is not a CNAME record already, since you can't set both and who knows what takes precedence
+		# (2) there is not an A record already (if this is an A record this is a dup of (1), and if this is an AAAA record then don't set a default AAAA record if the user sets a custom A record, since the default wouldn't make sense and it should not resolve if the user doesn't provide a new AAAA record)
+		if not has_rec(qname, rtype) and not has_rec(qname, "CNAME") and not has_rec(qname, "A"):
 			records.append((qname, rtype, value, explanation))
 
+	# Don't pin the list of records that has_rec checks against anymore.
+	has_rec_base = records
+
+	# SPF record: Permit the box ('mx', see above) to send mail on behalf of
+	# the domain, and no one else.
+	# Skip if the user has set a custom SPF record.
+	if not has_rec(None, "TXT", prefix="v=spf1 "):
+		records.append((None,  "TXT", 'v=spf1 mx -all', "Recommended. Specifies that only the box is permitted to send @%s mail." % domain))
+
 	# Append the DKIM TXT record to the zone as generated by OpenDKIM.
+	# Skip if the user has set a DKIM record already.
 	opendkim_record_file = os.path.join(env['STORAGE_ROOT'], 'mail/dkim/mail.txt')
 	with open(opendkim_record_file) as orf:
-		m = re.match(r'(\S+)\s+IN\s+TXT\s+\( "([^"]+)"\s+"([^"]+)"\s*\)', orf.read(), re.S)
-		val = m.group(2) + m.group(3)
-		records.append((m.group(1), "TXT", val, "Recommended. Provides a way for recipients to verify that this machine sent @%s mail." % domain))
+		m = re.match(r'(\S+)\s+IN\s+TXT\s+\( ((?:"[^"]+"\s+)+)\)', orf.read(), re.S)
+		val = "".join(re.findall(r'"([^"]+)"', m.group(2)))
+		if not has_rec(m.group(1), "TXT", prefix="v=DKIM1; "):
+			records.append((m.group(1), "TXT", val, "Recommended. Provides a way for recipients to verify that this machine sent @%s mail." % domain))
 
 	# Append a DMARC record.
-	records.append(("_dmarc", "TXT", 'v=DMARC1; p=quarantine', "Optional. Specifies that mail that does not originate from the box but claims to be from @%s is suspect and should be quarantined by the recipient's mail system." % domain))
+	# Skip if the user has set a DMARC record already.
+	if not has_rec("_dmarc", "TXT", prefix="v=DMARC1; "):
+		records.append(("_dmarc", "TXT", 'v=DMARC1; p=quarantine', "Recommended. Specifies that mail that does not originate from the box but claims to be from @%s or which does not have a valid DKIM signature is suspect and should be quarantined by the recipient's mail system." % domain))
 
 	# For any subdomain with an A record but no SPF or DMARC record, add strict policy records.
 	all_resolvable_qnames = set(r[0] for r in records if r[1] in ("A", "AAAA"))
 	for qname in all_resolvable_qnames:
 		if not has_rec(qname, "TXT", prefix="v=spf1 "):
-			records.append((qname,  "TXT", 'v=spf1 a mx -all', "Prevents unauthorized use of this domain name for outbound mail by requiring outbound mail to originate from the indicated host(s)."))
+			records.append((qname,  "TXT", 'v=spf1 -all', "Recommended. Prevents use of this domain name for outbound mail by specifying that no servers are valid sources for mail from @%s. If you do send email from this domain name you should either override this record such that the SPF rule does allow the originating server, or, take the recommended approach and have the box handle mail for this domain (simply add any receiving alias at this domain name to make this machine treat the domain name as one of its mail domains)." % (qname + "." + domain)))
 		dmarc_qname = "_dmarc" + ("" if qname is None else "." + qname)
 		if not has_rec(dmarc_qname, "TXT", prefix="v=DMARC1; "):
-			records.append((dmarc_qname, "TXT", 'v=DMARC1; p=reject', "Prevents unauthorized use of this domain name for outbound mail by requiring a valid DKIM signature."))
-		
+			records.append((dmarc_qname, "TXT", 'v=DMARC1; p=reject', "Recommended. Prevents use of this domain name for outbound mail by specifying that the SPF rule should be honoured for mail from @%s." % (qname + "." + domain)))
+
 
 	# Sort the records. The None records *must* go first in the nsd zone file. Otherwise it doesn't matter.
 	records.sort(key = lambda rec : list(reversed(rec[0].split(".")) if rec[0] is not None else ""))
@@ -252,70 +281,42 @@ def build_zone(domain, all_domains, additional_records, env, is_zone=True):
 
 ########################################################################
 
-def get_custom_records(domain, additional_records, env):
-	for qname, value in additional_records.items():
-		# Is this record for the domain or one of its subdomains?
-		# If `domain` is None, return records for all domains.
-		if domain is not None and qname != domain and not qname.endswith("." + domain): continue
-
-		# Turn the fully qualified domain name in the YAML file into
-		# our short form (None => domain, or a relative QNAME) if
-		# domain is not None.
-		if domain is not None:
-			if qname == domain:
-				qname = None
-			else:
-				qname = qname[0:len(qname)-len("." + domain)]
-
-		# Short form. Mapping a domain name to a string is short-hand
-		# for creating A records.
-		if isinstance(value, str):
-			values = [("A", value)]
-			if value == "local" and env.get("PUBLIC_IPV6"):
-				values.append( ("AAAA", value) )
-
-		# A mapping creates multiple records.
-		elif isinstance(value, dict):
-			values = value.items()
-
-		# No other type of data is allowed.
-		else:
-			raise ValueError()
-
-		for rtype, value2 in values:
-			# The "local" keyword on A/AAAA records are short-hand for our own IP.
-			# This also flags for web configuration that the user wants a website here.
-			if rtype == "A" and value2 == "local":
-				value2 = env["PUBLIC_IP"]
-			if rtype == "AAAA" and value2 == "local":
-				if "PUBLIC_IPV6" not in env: continue # no IPv6 address is available so don't set anything
-				value2 = env["PUBLIC_IPV6"]
-			yield (qname, rtype, value2)
-
-########################################################################
-
 def build_tlsa_record(env):
 	# A DANE TLSA record in DNS specifies that connections on a port
-	# must use TLS and the certificate must match a particular certificate.
+	# must use TLS and the certificate must match a particular criteria.
 	#
 	# Thanks to http://blog.huque.com/2012/10/dnssec-and-certificates.html
-	# for explaining all of this!
+	# and https://community.letsencrypt.org/t/please-avoid-3-0-1-and-3-0-2-dane-tlsa-records-with-le-certificates/7022
+	# for explaining all of this! Also see https://tools.ietf.org/html/rfc6698#section-2.1
+	# and https://github.com/mail-in-a-box/mailinabox/issues/268#issuecomment-167160243.
+	#
+	# There are several criteria. We used to use "3 0 1" criteria, which
+	# meant to pin a leaf (3) certificate (0) with SHA256 hash (1). But
+	# certificates change, and especially as we move to short-lived certs
+	# they change often. The TLSA record handily supports the criteria of
+	# a leaf certificate (3)'s subject public key (1) with SHA256 hash (1).
+	# The subject public key is the public key portion of the private key
+	# that generated the CSR that generated the certificate. Since we
+	# generate a private key once the first time Mail-in-a-Box is set up
+	# and reuse it for all subsequent certificates, the TLSA record will
+	# remain valid indefinitely.
 
-	# Get the hex SHA256 of the DER-encoded server certificate:
-	certder = shell("check_output", [
-		"/usr/bin/openssl",
-		"x509",
-		"-in", os.path.join(env["STORAGE_ROOT"], "ssl", "ssl_certificate.pem"),
-		"-outform", "DER"
-		],
-		return_bytes=True)
-	certhash = hashlib.sha256(certder).hexdigest()
+	from ssl_certificates import load_cert_chain, load_pem
+	from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+	fn = os.path.join(env["STORAGE_ROOT"], "ssl", "ssl_certificate.pem")
+	cert = load_pem(load_cert_chain(fn)[0])
+
+	subject_public_key = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+	# We could have also loaded ssl_private_key.pem and called priv_key.public_key().public_bytes(...)
+
+	pk_hash = hashlib.sha256(subject_public_key).hexdigest()
 
 	# Specify the TLSA parameters:
-	# 3: This is the certificate that the client should trust. No CA is needed.
-	# 0: The whole certificate is matched.
-	# 1: The certificate is SHA256'd here.
-	return "3 0 1 " + certhash
+	# 3: Match the (leaf) certificate. (No CA, no trust path needed.)
+	# 1: Match its subject public key.
+	# 1: Use SHA256.
+	return "3 1 1 " + pk_hash
 
 def build_sshfp_records():
 	# The SSHFP record is a way for us to embed this server's SSH public
@@ -353,7 +354,7 @@ def build_sshfp_records():
 			# Lots of things can go wrong. Don't let it disturb the DNS
 			# zone.
 			pass
-	
+
 ########################################################################
 
 def write_nsd_zone(domain, zonefile, records, env, force):
@@ -390,9 +391,16 @@ $TTL 1800           ; default time to live
 			zone += subdomain
 		zone += "\tIN\t" + querytype + "\t"
 		if querytype == "TXT":
-			value = value.replace('\\', '\\\\') # escape backslashes
-			value = value.replace('"', '\\"') # escape quotes
-			value = '"' + value + '"' # wrap in quotes
+			# Divide into 255-byte max substrings.
+			v2 = ""
+			while len(value) > 0:
+				s = value[0:255]
+				value = value[255:]
+				s = s.replace('\\', '\\\\') # escape backslashes
+				s = s.replace('"', '\\"') # escape quotes
+				s = '"' + s + '"' # wrap in quotes
+				v2 += s + " "
+			value = v2
 		zone += value + "\n"
 
 	# DNSSEC requires re-signing a zone periodically. That requires
@@ -460,25 +468,9 @@ $TTL 1800           ; default time to live
 ########################################################################
 
 def write_nsd_conf(zonefiles, additional_records, env):
-	# Basic header.
-	nsdconf = """
-server:
-  hide-version: yes
-
-  # identify the server (CH TXT ID.SERVER entry).
-  identity: ""
-
-  # The directory for zonefile: files.
-  zonesdir: "/etc/nsd/zones"
-"""
-	
-	# Since we have bind9 listening on localhost for locally-generated
-	# DNS queries that require a recursive nameserver, and the system
-	# might have other network interfaces for e.g. tunnelling, we have
-	# to be specific about the network interfaces that nsd binds to.
-	for ipaddr in (env.get("PRIVATE_IP", "") + " " + env.get("PRIVATE_IPV6", "")).split(" "):
-		if ipaddr == "": continue
-		nsdconf += "  ip-address: %s\n" % ipaddr
+	# Write the list of zones to a configuration file.
+	nsd_conf_file = "/etc/nsd/zones.conf"
+	nsdconf = ""
 
 	# Append the zones.
 	for domain, zonefile in zonefiles:
@@ -488,39 +480,34 @@ zone:
 	zonefile: %s
 """ % (domain, zonefile)
 
-		# If a custom secondary nameserver has been set, allow zone transfers
-		# and notifies to that nameserver.
-		if additional_records.get("_secondary_nameserver"):
-			# Get the IP address of the nameserver by resolving it.
-			hostname = additional_records.get("_secondary_nameserver")
-			resolver = dns.resolver.get_default_resolver()
-			response = dns.resolver.query(hostname+'.', "A")
-			ipaddr = str(response[0])
-			nsdconf += """\tnotify: %s NOKEY
-	provide-xfr: %s NOKEY
-""" % (ipaddr, ipaddr)
+		# If custom secondary nameservers have been set, allow zone transfers
+		# and notifies to them.
+		for ipaddr in get_secondary_dns(additional_records, mode="xfr"):
+			nsdconf += "\n\tnotify: %s NOKEY\n\tprovide-xfr: %s NOKEY\n" % (ipaddr, ipaddr)
 
-
-	# Check if the nsd.conf is changing. If it isn't changing,
+	# Check if the file is changing. If it isn't changing,
 	# return False to flag that no change was made.
-	with open("/etc/nsd/nsd.conf") as f:
-		if f.read() == nsdconf:
-			return False
+	if os.path.exists(nsd_conf_file):
+		with open(nsd_conf_file) as f:
+			if f.read() == nsdconf:
+				return False
 
-	with open("/etc/nsd/nsd.conf", "w") as f:
+	# Write out new contents and return True to signal that
+	# configuration changed.
+	with open(nsd_conf_file, "w") as f:
 		f.write(nsdconf)
-
 	return True
 
 ########################################################################
 
 def dnssec_choose_algo(domain, env):
 	if '.' in domain and domain.rsplit('.')[-1] in \
-		("email", "guide", "fund"):
+		("email", "guide", "fund", "be"):
 		# At GoDaddy, RSASHA256 is the only algorithm supported
 		# for .email and .guide.
 		# A variety of algorithms are supported for .fund. This
 		# is preferred.
+		# Gandi tells me that .be does not support RSASHA1-NSEC3-SHA1
 		return "RSASHA256"
 
 	# For any domain we were able to sign before, don't change the algorithm
@@ -535,7 +522,7 @@ def sign_zone(domain, zonefile, env):
 	# a new .key file with a DNSSEC record for the specific domain. We
 	# can reuse the same key, but it won't validate without a DNSSEC
 	# record specifically for the domain.
-	# 
+	#
 	# Copy the .key and .private files to /tmp to patch them up.
 	#
 	# Use os.umask and open().write() to securely create a copy that only
@@ -600,8 +587,9 @@ def sign_zone(domain, zonefile, env):
 
 ########################################################################
 
-def write_opendkim_tables(zonefiles, env):
-	# Append a record to OpenDKIM's KeyTable and SigningTable for each domain.
+def write_opendkim_tables(domains, env):
+	# Append a record to OpenDKIM's KeyTable and SigningTable for each domain
+	# that we send mail from (zones and all subdomains).
 
 	opendkim_key_file = os.path.join(env['STORAGE_ROOT'], 'mail/dkim/mail.private')
 
@@ -620,7 +608,7 @@ def write_opendkim_tables(zonefiles, env):
 		"SigningTable":
 			"".join(
 				"*@{domain} {domain}\n".format(domain=domain)
-				for domain, zonefile in zonefiles
+				for domain in domains
 			),
 
 		# The KeyTable specifies the signing domain, the DKIM selector, and the
@@ -629,7 +617,7 @@ def write_opendkim_tables(zonefiles, env):
 		"KeyTable":
 			"".join(
 				"{domain} {domain}:mail:{key_file}\n".format(domain=domain, key_file=opendkim_key_file)
-				for domain, zonefile in zonefiles
+				for domain in domains
 			),
 	}
 
@@ -652,7 +640,94 @@ def write_opendkim_tables(zonefiles, env):
 
 ########################################################################
 
-def set_custom_dns_record(qname, rtype, value, env):
+def get_custom_dns_config(env):
+	try:
+		custom_dns = rtyaml.load(open(os.path.join(env['STORAGE_ROOT'], 'dns/custom.yaml')))
+		if not isinstance(custom_dns, dict): raise ValueError() # caught below
+	except:
+		return [ ]
+
+	for qname, value in custom_dns.items():
+		# Short form. Mapping a domain name to a string is short-hand
+		# for creating A records.
+		if isinstance(value, str):
+			values = [("A", value)]
+
+		# A mapping creates multiple records.
+		elif isinstance(value, dict):
+			values = value.items()
+
+		# No other type of data is allowed.
+		else:
+			raise ValueError()
+
+		for rtype, value2 in values:
+			if isinstance(value2, str):
+				yield (qname, rtype, value2)
+			elif isinstance(value2, list):
+				for value3 in value2:
+					yield (qname, rtype, value3)
+			# No other type of data is allowed.
+			else:
+				raise ValueError()
+
+def filter_custom_records(domain, custom_dns_iter):
+	for qname, rtype, value in custom_dns_iter:
+		# We don't count the secondary nameserver config (if present) as a record - that would just be
+		# confusing to users. Instead it is accessed/manipulated directly via (get/set)_custom_dns_config.
+		if qname == "_secondary_nameserver": continue
+
+		# Is this record for the domain or one of its subdomains?
+		# If `domain` is None, return records for all domains.
+		if domain is not None and qname != domain and not qname.endswith("." + domain): continue
+
+		# Turn the fully qualified domain name in the YAML file into
+		# our short form (None => domain, or a relative QNAME) if
+		# domain is not None.
+		if domain is not None:
+			if qname == domain:
+				qname = None
+			else:
+				qname = qname[0:len(qname)-len("." + domain)]
+
+		yield (qname, rtype, value)
+
+def write_custom_dns_config(config, env):
+	# We get a list of (qname, rtype, value) triples. Convert this into a
+	# nice dictionary format for storage on disk.
+	from collections import OrderedDict
+	config = list(config)
+	dns = OrderedDict()
+	seen_qnames = set()
+
+	# Process the qnames in the order we see them.
+	for qname in [rec[0] for rec in config]:
+		if qname in seen_qnames: continue
+		seen_qnames.add(qname)
+
+		records = [(rec[1], rec[2]) for rec in config if rec[0] == qname]
+		if len(records) == 1 and records[0][0] == "A":
+			dns[qname] = records[0][1]
+		else:
+			dns[qname] = OrderedDict()
+			seen_rtypes = set()
+
+			# Process the rtypes in the order we see them.
+			for rtype in [rec[0] for rec in records]:
+				if rtype in seen_rtypes: continue
+				seen_rtypes.add(rtype)
+
+				values = [rec[1] for rec in records if rec[0] == rtype]
+				if len(values) == 1:
+					values = values[0]
+				dns[qname][rtype] = values
+
+	# Write.
+	config_yaml = rtyaml.dump(dns)
+	with open(os.path.join(env['STORAGE_ROOT'], 'dns/custom.yaml'), "w") as f:
+		f.write(config_yaml)
+
+def set_custom_dns_record(qname, rtype, value, action, env):
 	# validate qname
 	for zone, fn in get_dns_zones(env):
 		# It must match a zone apex or be a subdomain of a zone
@@ -661,153 +736,143 @@ def set_custom_dns_record(qname, rtype, value, env):
 			break
 	else:
 		# No match.
-		raise ValueError("%s is not a domain name or a subdomain of a domain name managed by this box." % qname)
+		if qname != "_secondary_nameserver":
+			raise ValueError("%s is not a domain name or a subdomain of a domain name managed by this box." % qname)
 
 	# validate rtype
 	rtype = rtype.upper()
-	if value is not None:
+	if value is not None and qname != "_secondary_nameserver":
 		if rtype in ("A", "AAAA"):
-			v = ipaddress.ip_address(value)
-			if rtype == "A" and not isinstance(v, ipaddress.IPv4Address): raise ValueError("That's an IPv6 address.")
-			if rtype == "AAAA" and not isinstance(v, ipaddress.IPv6Address): raise ValueError("That's an IPv4 address.")
-		elif rtype in ("CNAME", "TXT", "SRV"):
+			if value != "local": # "local" is a special flag for us
+				v = ipaddress.ip_address(value) # raises a ValueError if there's a problem
+				if rtype == "A" and not isinstance(v, ipaddress.IPv4Address): raise ValueError("That's an IPv6 address.")
+				if rtype == "AAAA" and not isinstance(v, ipaddress.IPv6Address): raise ValueError("That's an IPv4 address.")
+		elif rtype in ("CNAME", "TXT", "SRV", "MX"):
 			# anything goes
 			pass
 		else:
 			raise ValueError("Unknown record type '%s'." % rtype)
 
 	# load existing config
-	config = get_custom_dns_config(env)
+	config = list(get_custom_dns_config(env))
 
 	# update
-	if qname not in config:
-		if value is None:
-			# Is asking to delete a record that does not exist.
-			return False
-		elif rtype == "A":
-			# Add this record using the short form 'qname: value'.
-			config[qname] = value
-		else:
-			# Add this record. This is the qname's first record.
-			config[qname] = { rtype: value }
-	else:
-		if isinstance(config[qname], str):
-			# This is a short-form 'qname: value' implicit-A record.
-			if value is None and rtype != "A":
-				# Is asking to delete a record that doesn't exist.
+	newconfig = []
+	made_change = False
+	needs_add = True
+	for _qname, _rtype, _value in config:
+		if action == "add":
+			if (_qname, _rtype, _value) == (qname, rtype, value):
+				# Record already exists. Bail.
 				return False
-			elif value is None and rtype == "A":
-				# Delete record.
-				del config[qname]
-			elif rtype == "A":
-				# Update, keeping short form.
-				if config[qname] == "value":
-					# No change.
-					return False
-				config[qname] = value
-			else:
-				# Expand short form so we can add a new record type.
-				config[qname] = { "A": config[qname], rtype: value }
-		else:
-			# This is the qname: { ... } (dict) format.
-			if value is None:
-				if rtype not in config[qname]:
-					# Is asking to delete a record that doesn't exist.
-					return False
+		elif action == "set":
+			if (_qname, _rtype) == (qname, rtype):
+				if _value == value:
+					# Flag that the record already exists, don't
+					# need to add it.
+					needs_add = False
 				else:
-					# Delete the record. If it's the last record, delete the domain.
-					del config[qname][rtype]
-					if len(config[qname]) == 0:
-						del config[qname]
-			else:
-				# Update the record.
-				if config[qname].get(rtype) == "value":
-					# No change.
-					return False
-				config[qname][rtype] = value
+					# Drop any other values for this (qname, rtype).
+					made_change = True
+					continue
+		elif action == "remove":
+			if (_qname, _rtype, _value) == (qname, rtype, value):
+				# Drop this record.
+				made_change = True
+				continue
+			if value == None and (_qname, _rtype) == (qname, rtype):
+				# Drop all qname-rtype records.
+				made_change = True
+				continue
+		else:
+			raise ValueError("Invalid action: " + action)
 
-	# serialize & save
-	write_custom_dns_config(config, env)
+		# Preserve this record.
+		newconfig.append((_qname, _rtype, _value))
 
-	return True
+	if action in ("add", "set") and needs_add and value is not None:
+		newconfig.append((qname, rtype, value))
+		made_change = True
+
+	if made_change:
+		# serialize & save
+		write_custom_dns_config(newconfig, env)
+	return made_change
 
 ########################################################################
 
-def set_secondary_dns(hostname, env):
-	config = get_custom_dns_config(env)
+def get_secondary_dns(custom_dns, mode=None):
+	resolver = dns.resolver.get_default_resolver()
+	resolver.timeout = 10
 
-	if hostname in (None, ""):
-		# Clear.
-		if "_secondary_nameserver" in config:
-			del config["_secondary_nameserver"]
-	else:
-		# Validate.
-		hostname = hostname.strip().lower()
+	values = []
+	for qname, rtype, value in custom_dns:
+		if qname != '_secondary_nameserver': continue
+		for hostname in value.split(" "):
+			hostname = hostname.strip()
+			if mode == None:
+				# Just return the setting.
+				values.append(hostname)
+				continue
+
+			# This is a hostname. Before including in zone xfr lines,
+			# resolve to an IP address. Otherwise just return the hostname.
+			if not hostname.startswith("xfr:"):
+				if mode == "xfr":
+					response = dns.resolver.query(hostname+'.', "A")
+					hostname = str(response[0])
+				values.append(hostname)
+
+			# This is a zone-xfer-only IP address. Do not return if
+			# we're querying for NS record hostnames. Only return if
+			# we're querying for zone xfer IP addresses - return the
+			# IP address.
+			elif mode == "xfr":
+				values.append(hostname[4:])
+
+	return values
+
+def set_secondary_dns(hostnames, env):
+	if len(hostnames) > 0:
+		# Validate that all hostnames are valid and that all zone-xfer IP addresses are valid.
 		resolver = dns.resolver.get_default_resolver()
-		try:
-			response = dns.resolver.query(hostname, "A")
-		except (dns.resolver.NoNameservers, dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-			raise ValueError("Could not resolve the IP address of %s." % hostname)
+		resolver.timeout = 5
+		for item in hostnames:
+			if not item.startswith("xfr:"):
+				# Resolve hostname.
+				try:
+					response = resolver.query(item, "A")
+				except (dns.resolver.NoNameservers, dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+					raise ValueError("Could not resolve the IP address of %s." % item)
+			else:
+				# Validate IP address.
+				try:
+					v = ipaddress.ip_address(item[4:]) # raises a ValueError if there's a problem
+					if not isinstance(v, ipaddress.IPv4Address): raise ValueError("That's an IPv6 address.")
+				except ValueError:
+					raise ValueError("'%s' is not an IPv4 address." % item[4:])
 
 		# Set.
-		config["_secondary_nameserver"] = hostname
+		set_custom_dns_record("_secondary_nameserver", "A", " ".join(hostnames), "set", env)
+	else:
+		# Clear.
+		set_custom_dns_record("_secondary_nameserver", "A", None, "set", env)
 
-	# Save and apply.
-	write_custom_dns_config(config, env)
+	# Apply.
 	return do_dns_update(env)
 
 
-########################################################################
-
-def justtestingdotemail(domain, records):
-	# If the domain is a subdomain of justtesting.email, which we own,
-	# automatically populate the zone where it is set up on dns4e.com.
-	# Ideally if dns4e.com supported NS records we would just have it
-	# delegate DNS to us, but instead we will populate the whole zone.
-
-	import subprocess, json, urllib.parse
-
-	if not domain.endswith(".justtesting.email"):
-		return
-
-	for subdomain, querytype, value, explanation in records:
-		if querytype in ("NS",): continue
-		if subdomain in ("www", "ns1", "ns2"): continue # don't do unnecessary things
-
-		if subdomain == None:
-			subdomain = domain
-		else:
-			subdomain = subdomain + "." + domain
-
-		if querytype == "TXT":
-			# nsd requires parentheses around txt records with multiple parts,
-			# but DNS4E requires there be no parentheses; also it goes into
-			# nsd with a newline and a tab, which we replace with a space here
-			value = re.sub("^\s*\(\s*([\w\W]*)\)", r"\1", value)
-			value = re.sub("\s+", " ", value)
-		else:
-			continue
-
-		print("Updating DNS for %s/%s..." % (subdomain, querytype))
-		resp = json.loads(subprocess.check_output([
-			"curl",
-			"-s",
-			"https://api.dns4e.com/v7/%s/%s" % (urllib.parse.quote(subdomain), querytype.lower()),
-			"--user", "2ddbd8e88ed1495fa0ec:A97TDJV26CVUJS6hqAs0CKnhj4HvjTM7MwAAg8xb",
-			"--data", "record=%s" % urllib.parse.quote(value),
-			]).decode("utf8"))
-		print("\t...", resp.get("message", "?"))
+def get_custom_dns_record(custom_dns, qname, rtype):
+	for qname1, rtype1, value in custom_dns:
+		if qname1 == qname and rtype1 == rtype:
+			return value
+	return None
 
 ########################################################################
 
 def build_recommended_dns(env):
 	ret = []
-	domains = get_dns_domains(env)
-	zonefiles = get_dns_zones(env)
-	additional_records = get_custom_dns_config(env)
-	for domain, zonefile in zonefiles:
-		records = build_zone(domain, domains, additional_records, env)
-
+	for (domain, zonefile, records) in build_zones(env):
 		# remove records that we don't dislay
 		records = [r for r in records if r[3] is not False]
 
@@ -835,8 +900,11 @@ def build_recommended_dns(env):
 if __name__ == "__main__":
 	from utils import load_environment
 	env = load_environment()
-	for zone, records in build_recommended_dns(env):
-		for record in records:
-			print("; " + record['explanation'])
-			print(record['qname'], record['rtype'], record['value'], sep="\t")
-			print()
+	if sys.argv[-1] == "--lint":
+		write_custom_dns_config(get_custom_dns_config(env), env)
+	else:
+		for zone, records in build_recommended_dns(env):
+			for record in records:
+				print("; " + record['explanation'])
+				print(record['qname'], record['rtype'], record['value'], sep="\t")
+				print()

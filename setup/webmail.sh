@@ -19,10 +19,12 @@ source /etc/mailinabox.conf # load global vars
 # and then we'll manually install roundcube from source.
 
 # These dependencies are from `apt-cache showpkg roundcube-core`.
+echo "Installing Roundcube (webmail)..."
 apt_install \
 	dbconfig-common \
 	php5 php5-sqlite php5-mcrypt php5-intl php5-json php5-common php-auth php-net-smtp php-net-socket php-net-sieve php-mail-mime php-crypt-gpg php5-gd php5-pspell \
 	tinymce libjs-jquery libjs-jquery-mousewheel libmagic1
+apt_get_quiet remove php-mail-mimedecode # no longer needed since Roundcube 1.1.3
 
 # We used to install Roundcube from Ubuntu, without triggering the dependencies #NODOC
 # on Apache and MySQL, by downloading the debs and installing them manually. #NODOC
@@ -30,30 +32,50 @@ apt_install \
 apt-get purge -qq -y roundcube* #NODOC
 
 # Install Roundcube from source if it is not already present or if it is out of date.
-VERSION=1.0.3
+# Combine the Roundcube version number with the commit hash of vacation_sieve to track
+# whether we have the latest version.
+VERSION=1.1.3
+HASH=4513227bd64eb8564f056817341b1dfe478e215e
+VACATION_SIEVE_VERSION=91ea6f52216390073d1f5b70b5f6bea0bfaee7e5
+PERSISTENT_LOGIN_VERSION=117fbd8f93b56b2bf72ad055193464803ef3bc36
+HTML5_NOTIFIER_VERSION=046eb388dd63b1ec77a3ee485757fc25ae9e684d
+UPDATE_KEY=$VERSION:$VACATION_SIEVE_VERSION:$PERSISTENT_LOGIN_VERSION:$HTML5_NOTIFIER_VERSION:a
 needs_update=0 #NODOC
 if [ ! -f /usr/local/lib/roundcubemail/version ]; then
 	# not installed yet #NODOC
 	needs_update=1 #NODOC
-elif [[ $VERSION != `cat /usr/local/lib/roundcubemail/version` ]]; then
+elif [[ "$UPDATE_KEY" != `cat /usr/local/lib/roundcubemail/version` ]]; then
 	# checks if the version is what we want
 	needs_update=1 #NODOC
 fi
 if [ $needs_update == 1 ]; then
-	echo installing roudcube webmail $VERSION...
-	rm -f /tmp/roundcube.tgz
-	wget -qO /tmp/roundcube.tgz http://downloads.sourceforge.net/project/roundcubemail/roundcubemail/$VERSION/roundcubemail-$VERSION.tar.gz
-	tar -C /usr/local/lib -zxf /tmp/roundcube.tgz
+	# install roundcube
+	wget_verify \
+		https://downloads.sourceforge.net/project/roundcubemail/roundcubemail/$VERSION/roundcubemail-$VERSION.tar.gz \
+		$HASH \
+		/tmp/roundcube.tgz
+	tar -C /usr/local/lib --no-same-owner -zxf /tmp/roundcube.tgz
 	rm -rf /usr/local/lib/roundcubemail
 	mv /usr/local/lib/roundcubemail-$VERSION/ /usr/local/lib/roundcubemail
 	rm -f /tmp/roundcube.tgz
-	echo $VERSION > /usr/local/lib/roundcubemail/version
+
+	# install roundcube autoreply/vacation plugin
+	git_clone https://github.com/arodier/Roundcube-Plugins.git $VACATION_SIEVE_VERSION plugins/vacation_sieve /usr/local/lib/roundcubemail/plugins/vacation_sieve
+
+	# install roundcube persistent_login plugin
+	git_clone https://github.com/mfreiholz/Roundcube-Persistent-Login-Plugin.git $PERSISTENT_LOGIN_VERSION '' /usr/local/lib/roundcubemail/plugins/persistent_login
+
+	# install roundcube html5_notifier plugin
+	git_clone https://github.com/kitist/html5_notifier.git $HTML5_NOTIFIER_VERSION '' /usr/local/lib/roundcubemail/plugins/html5_notifier
+
+	# record the version we've installed
+	echo $UPDATE_KEY > /usr/local/lib/roundcubemail/version
 fi
 
 # ### Configuring Roundcube
 
 # Generate a safe 24-character secret key of safe characters.
-SECRET_KEY=$(dd if=/dev/random bs=1 count=18 2>/dev/null | base64 | fold -w 24 | head -n 1)
+SECRET_KEY=$(dd if=/dev/urandom bs=1 count=18 2>/dev/null | base64 | fold -w 24 | head -n 1)
 
 # Create a configuration file.
 #
@@ -79,12 +101,32 @@ cat > /usr/local/lib/roundcubemail/config/config.inc.php <<EOF;
 \$config['support_url'] = 'https://mailinabox.email/';
 \$config['product_name'] = 'Mail-in-a-Box/Roundcube Webmail';
 \$config['des_key'] = '$SECRET_KEY';
-\$config['plugins'] = array('archive', 'zipdownload', 'password', 'managesieve');
+\$config['plugins'] = array('html5_notifier', 'archive', 'zipdownload', 'password', 'managesieve', 'jqueryui', 'vacation_sieve', 'persistent_login');
 \$config['skin'] = 'classic';
 \$config['login_autocomplete'] = 2;
 \$config['password_charset'] = 'UTF-8';
 \$config['junk_mbox'] = 'Spam';
 ?>
+EOF
+
+# Configure vaction_sieve.
+cat > /usr/local/lib/roundcubemail/plugins/vacation_sieve/config.inc.php <<EOF;
+<?php
+/* Do not edit. Written by Mail-in-a-Box. Regenerated on updates. */
+\$rcmail_config['vacation_sieve'] = array(
+    'date_format' => 'd/m/Y',
+    'working_hours' => array(8,18),
+    'msg_format' => 'text',
+    'logon_transform' => array('#([a-z])[a-z]+(\.|\s)([a-z])#i', '\$1\$3'),
+    'transfer' => array(
+        'mode' =>  'managesieve',
+        'ms_activate_script' => true,
+        'host'   => 'localhost',
+        'port'   => '4190',
+        'usetls' => false,
+        'path' => 'vacation',
+    )
+);
 EOF
 
 # Create writable directories.

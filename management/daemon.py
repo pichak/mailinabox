@@ -4,12 +4,18 @@ import os, os.path, re, json
 
 from functools import wraps
 
-from flask import Flask, request, render_template, abort, Response
+from flask import Flask, request, render_template, abort, Response, send_from_directory
 
 import auth, utils
 from mailconfig import get_mail_users, get_mail_users_ex, get_admins, add_mail_user, set_mail_password, remove_mail_user
 from mailconfig import get_mail_user_privileges, add_remove_mail_user_privilege
 from mailconfig import get_mail_aliases, get_mail_aliases_ex, get_mail_domains, add_mail_alias, remove_mail_alias
+
+# Create a worker pool for the status checks. The pool should
+# live across http requests so we don't baloon the system with
+# processes.
+import multiprocessing.pool
+pool = multiprocessing.pool.Pool(processes=10)
 
 env = utils.load_environment()
 
@@ -22,21 +28,42 @@ try:
 except OSError:
 	pass
 
+# for generating CSRs we need a list of country codes
+csr_country_codes = []
+with open(os.path.join(os.path.dirname(me), "csr_country_codes.tsv")) as f:
+	for line in f:
+		if line.strip() == "" or line.startswith("#"): continue
+		code, name = line.strip().split("\t")[0:2]
+		csr_country_codes.append((code, name))
+
 app = Flask(__name__, template_folder=os.path.abspath(os.path.join(os.path.dirname(me), "templates")))
 
-# Decorator to protect views that require authentication.
+# Decorator to protect views that require a user with 'admin' privileges.
 def authorized_personnel_only(viewfunc):
 	@wraps(viewfunc)
 	def newview(*args, **kwargs):
-		# Check if the user is authorized.
-		authorized_status = auth_service.is_authenticated(request, env)
-		if authorized_status == "OK":
-			# Authorized. Call view func.	
+		# Authenticate the passed credentials, which is either the API key or a username:password pair.
+		error = None
+		try:
+			email, privs = auth_service.authenticate(request, env)
+		except ValueError as e:
+			# Authentication failed.
+			privs = []
+			error = str(e)
+
+		# Authorized to access an API view?
+		if "admin" in privs:
+			# Call view func.
 			return viewfunc(*args, **kwargs)
+		elif not error:
+			error = "You are not an administrator."
 
 		# Not authorized. Return a 401 (send auth) and a prompt to authorize by default.
 		status = 401
-		headers = { 'WWW-Authenticate': 'Basic realm="{0}"'.format(auth_service.auth_realm) }
+		headers = {
+			'WWW-Authenticate': 'Basic realm="{0}"'.format(auth_service.auth_realm),
+			'X-Reason': error,
+		}
 
 		if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
 			# Don't issue a 401 to an AJAX request because the user will
@@ -46,13 +73,13 @@ def authorized_personnel_only(viewfunc):
 
 		if request.headers.get('Accept') in (None, "", "*/*"):
 			# Return plain text output.
-			return Response(authorized_status+"\n", status=status, mimetype='text/plain', headers=headers)
+			return Response(error+"\n", status=status, mimetype='text/plain', headers=headers)
 		else:
 			# Return JSON output.
 			return Response(json.dumps({
 				"status": "error",
-				"reason": authorized_status
-				}+"\n"), status=status, mimetype='application/json', headers=headers)
+				"reason": error,
+				})+"\n", status=status, mimetype='application/json', headers=headers)
 
 	return newview
 
@@ -61,7 +88,7 @@ def unauthorized(error):
 	return auth_service.make_unauthorized_response()
 
 def json_response(data):
-	return Response(json.dumps(data), status=200, mimetype='application/json')
+	return Response(json.dumps(data, indent=2, sort_keys=True)+'\n', status=200, mimetype='application/json')
 
 ###################################
 
@@ -71,26 +98,48 @@ def json_response(data):
 def index():
 	# Render the control panel. This route does not require user authentication
 	# so it must be safe!
+
+	no_users_exist = (len(get_mail_users(env)) == 0)
 	no_admins_exist = (len(get_admins(env)) == 0)
+
+	utils.fix_boto() # must call prior to importing boto
+	import boto.s3
+	backup_s3_hosts = [(r.name, r.endpoint) for r in boto.s3.regions()]
+
 	return render_template('index.html',
 		hostname=env['PRIMARY_HOSTNAME'],
 		storage_root=env['STORAGE_ROOT'],
+
+		no_users_exist=no_users_exist,
 		no_admins_exist=no_admins_exist,
+
+		backup_s3_hosts=backup_s3_hosts,
+		csr_country_codes=csr_country_codes,
 	)
 
 @app.route('/me')
 def me():
 	# Is the caller authorized?
-	authorized_status = auth_service.is_authenticated(request, env)
-	if authorized_status != "OK":
+	try:
+		email, privs = auth_service.authenticate(request, env)
+	except ValueError as e:
 		return json_response({
-			"status": "not-authorized",
-			"reason": authorized_status,
+			"status": "invalid",
+			"reason": str(e),
 			})
-	return json_response({
-		"status": "authorized",
-		"api_key": auth_service.key,
-		})
+
+	resp = {
+		"status": "ok",
+		"email": email,
+		"privileges": privs,
+	}
+
+	# Is authorized as admin? Return an API key for future use.
+	if "admin" in privs:
+		resp["api_key"] = auth_service.create_user_key(email, env)
+
+	# Return.
+	return json_response(resp)
 
 # MAIL
 
@@ -148,14 +197,15 @@ def mail_aliases():
 	if request.args.get("format", "") == "json":
 		return json_response(get_mail_aliases_ex(env))
 	else:
-		return "".join(x+"\t"+y+"\n" for x, y in get_mail_aliases(env))
+		return "".join(address+"\t"+receivers+"\t"+(senders or "")+"\n" for address, receivers, senders in get_mail_aliases(env))
 
 @app.route('/mail/aliases/add', methods=['POST'])
 @authorized_personnel_only
 def mail_aliases_add():
 	return add_mail_alias(
-		request.form.get('source', ''),
-		request.form.get('destination', ''),
+		request.form.get('address', ''),
+		request.form.get('forwards_to', ''),
+		request.form.get('permitted_senders', ''),
 		env,
 		update_if_exists=(request.form.get('update_if_exists', '') == '1')
 		)
@@ -163,7 +213,7 @@ def mail_aliases_add():
 @app.route('/mail/aliases/remove', methods=['POST'])
 @authorized_personnel_only
 def mail_aliases_remove():
-	return remove_mail_alias(request.form.get('source', ''), env)
+	return remove_mail_alias(request.form.get('address', ''), env)
 
 @app.route('/mail/domains')
 @authorized_personnel_only
@@ -190,50 +240,82 @@ def dns_update():
 @app.route('/dns/secondary-nameserver')
 @authorized_personnel_only
 def dns_get_secondary_nameserver():
-	from dns_update import get_custom_dns_config
-	return json_response({ "hostname": get_custom_dns_config(env).get("_secondary_nameserver") })
+	from dns_update import get_custom_dns_config, get_secondary_dns
+	return json_response({ "hostnames": get_secondary_dns(get_custom_dns_config(env), mode=None) })
 
 @app.route('/dns/secondary-nameserver', methods=['POST'])
 @authorized_personnel_only
 def dns_set_secondary_nameserver():
 	from dns_update import set_secondary_dns
 	try:
-		return set_secondary_dns(request.form.get('hostname'), env)
+		return set_secondary_dns([ns.strip() for ns in re.split(r"[, ]+", request.form.get('hostnames') or "") if ns.strip() != ""], env)
 	except ValueError as e:
 		return (str(e), 400)
 
-@app.route('/dns/set')
+@app.route('/dns/custom')
 @authorized_personnel_only
-def dns_get_records():
-	from dns_update import get_custom_dns_config, get_custom_records
-	additional_records = get_custom_dns_config(env)
-	records = get_custom_records(None, additional_records, env)
-	return json_response([{
+def dns_get_records(qname=None, rtype=None):
+	from dns_update import get_custom_dns_config
+	return json_response([
+	{
 		"qname": r[0],
 		"rtype": r[1],
 		"value": r[2],
-		} for r in records])
+	}
+	for r in get_custom_dns_config(env)
+	if r[0] != "_secondary_nameserver"
+		and (not qname or r[0] == qname)
+		and (not rtype or r[1] == rtype) ])
 
-@app.route('/dns/set/<qname>', methods=['POST'])
-@app.route('/dns/set/<qname>/<rtype>', methods=['POST'])
-@app.route('/dns/set/<qname>/<rtype>/<value>', methods=['POST'])
+@app.route('/dns/custom/<qname>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/dns/custom/<qname>/<rtype>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 @authorized_personnel_only
-def dns_set_record(qname, rtype="A", value=None):
+def dns_set_record(qname, rtype="A"):
 	from dns_update import do_dns_update, set_custom_dns_record
 	try:
-		# Get the value from the URL, then the POST parameters, or if it is not set then
-		# use the remote IP address of the request --- makes dynamic DNS easy. To clear a
-		# value, '' must be explicitly passed.
-		if value is None:
-			value = request.form.get("value")
-		if value is None:
-			value = request.environ.get("HTTP_X_FORWARDED_FOR") # normally REMOTE_ADDR but we're behind nginx as a reverse proxy
-		if value == '' or value == '__delete__':
-			# request deletion
-			value = None
-		if set_custom_dns_record(qname, rtype, value, env):
-			return do_dns_update(env)
+		# Normalize.
+		rtype = rtype.upper()
+
+		# Read the record value from the request BODY, which must be
+		# ASCII-only. Not used with GET.
+		value = request.stream.read().decode("ascii", "ignore").strip()
+
+		if request.method == "GET":
+			# Get the existing records matching the qname and rtype.
+			return dns_get_records(qname, rtype)
+
+		elif request.method in ("POST", "PUT"):
+			# There is a default value for A/AAAA records.
+			if rtype in ("A", "AAAA") and value == "":
+				value = request.environ.get("HTTP_X_FORWARDED_FOR") # normally REMOTE_ADDR but we're behind nginx as a reverse proxy
+
+			# Cannot add empty records.
+			if value == '':
+				return ("No value for the record provided.", 400)
+
+			if request.method == "POST":
+				# Add a new record (in addition to any existing records
+				# for this qname-rtype pair).
+				action = "add"
+			elif request.method == "PUT":
+				# In REST, PUT is supposed to be idempotent, so we'll
+				# make this action set (replace all records for this
+				# qname-rtype pair) rather than add (add a new record).
+				action = "set"
+
+		elif request.method == "DELETE":
+			if value == '':
+				# Delete all records for this qname-type pair.
+				value = None
+			else:
+				# Delete just the qname-rtype-value record exactly.
+				pass
+			action = "remove"
+
+		if set_custom_dns_record(qname, rtype, value, action, env):
+			return do_dns_update(env) or "Something isn't right."
 		return "OK"
+
 	except ValueError as e:
 		return (str(e), 400)
 
@@ -245,21 +327,62 @@ def dns_get_dump():
 
 # SSL
 
+@app.route('/ssl/status')
+@authorized_personnel_only
+def ssl_get_status():
+	from ssl_certificates import get_certificates_to_provision
+	from web_update import get_web_domains_info, get_web_domains
+
+	# What domains can we provision certificates for? What unexpected problems do we have?
+	provision, cant_provision = get_certificates_to_provision(env, show_extended_problems=False)
+	
+	# What's the current status of TLS certificates on all of the domain?
+	domains_status = get_web_domains_info(env)
+	domains_status = [{ "domain": d["domain"], "status": d["ssl_certificate"][0], "text": d["ssl_certificate"][1] } for d in domains_status ]
+
+	# Warn the user about domain names not hosted here because of other settings.
+	for domain in set(get_web_domains(env, exclude_dns_elsewhere=False)) - set(get_web_domains(env)):
+		domains_status.append({
+			"domain": domain,
+			"status": "not-applicable",
+			"text": "The domain's website is hosted elsewhere.",
+		})
+
+	return json_response({
+		"can_provision": utils.sort_domains(provision, env),
+		"cant_provision": [{ "domain": domain, "problem": cant_provision[domain] } for domain in utils.sort_domains(cant_provision, env) ],
+		"status": domains_status,
+	})
+
 @app.route('/ssl/csr/<domain>', methods=['POST'])
 @authorized_personnel_only
 def ssl_get_csr(domain):
-	from web_update import get_domain_ssl_files, create_csr
-	ssl_key, ssl_certificate, csr_path = get_domain_ssl_files(domain, env)
-	return create_csr(domain, ssl_key, env)
+	from ssl_certificates import create_csr
+	ssl_private_key = os.path.join(os.path.join(env["STORAGE_ROOT"], 'ssl', 'ssl_private_key.pem'))
+	return create_csr(domain, ssl_private_key, request.form.get('countrycode', ''), env)
 
 @app.route('/ssl/install', methods=['POST'])
 @authorized_personnel_only
 def ssl_install_cert():
-	from web_update import install_cert
+	from web_update import get_web_domains
+	from ssl_certificates import install_cert
 	domain = request.form.get('domain')
 	ssl_cert = request.form.get('cert')
 	ssl_chain = request.form.get('chain')
+	if domain not in get_web_domains(env):
+		return "Invalid domain name."
 	return install_cert(domain, ssl_cert, ssl_chain, env)
+
+@app.route('/ssl/provision', methods=['POST'])
+@authorized_personnel_only
+def ssl_provision_certs():
+	from ssl_certificates import provision_certificates
+	agree_to_tos_url = request.form.get('agree_to_tos_url')
+	status = provision_certificates(env,
+		agree_to_tos_url=agree_to_tos_url,
+		jsonable=True)
+	return json_response(status)
+
 
 # WEB
 
@@ -276,6 +399,24 @@ def web_update():
 	return do_web_update(env)
 
 # System
+
+@app.route('/system/version', methods=["GET"])
+@authorized_personnel_only
+def system_version():
+	from status_checks import what_version_is_this
+	try:
+		return what_version_is_this(env)
+	except Exception as e:
+		return (str(e), 500)
+
+@app.route('/system/latest-upstream-version', methods=["POST"])
+@authorized_personnel_only
+def system_latest_upstream_version():
+	from status_checks import get_latest_miab_version
+	try:
+		return get_latest_miab_version()
+	except Exception as e:
+		return (str(e), 500)
 
 @app.route('/system/status', methods=["POST"])
 @authorized_personnel_only
@@ -295,7 +436,7 @@ def system_status():
 		def print_line(self, message, monospace=False):
 			self.items[-1]["extra"].append({ "text": message, "monospace": monospace })
 	output = WebOutput()
-	run_checks(env, output)
+	run_checks(False, env, output, pool)
 	return json_response(output.items)
 
 @app.route('/system/updates')
@@ -319,7 +460,52 @@ def do_updates():
 @authorized_personnel_only
 def backup_status():
 	from backup import backup_status
-	return json_response(backup_status(env))
+	try:
+		return json_response(backup_status(env))
+	except Exception as e:
+		return json_response({ "error": str(e) })
+
+@app.route('/system/backup/config', methods=["GET"])
+@authorized_personnel_only
+def backup_get_custom():
+	from backup import get_backup_config
+	return json_response(get_backup_config(env, for_ui=True))
+
+@app.route('/system/backup/config', methods=["POST"])
+@authorized_personnel_only
+def backup_set_custom():
+	from backup import backup_set_custom
+	return json_response(backup_set_custom(env,
+		request.form.get('target', ''),
+		request.form.get('target_user', ''),
+		request.form.get('target_pass', ''),
+		request.form.get('min_age', '')
+	))
+
+@app.route('/system/privacy', methods=["GET"])
+@authorized_personnel_only
+def privacy_status_get():
+	config = utils.load_settings(env)
+	return json_response(config.get("privacy", True))
+
+@app.route('/system/privacy', methods=["POST"])
+@authorized_personnel_only
+def privacy_status_set():
+	config = utils.load_settings(env)
+	config["privacy"] = (request.form.get('value') == "private")
+	utils.write_settings(config, env)
+	return "OK"
+
+# MUNIN
+
+@app.route('/munin/')
+@app.route('/munin/<path:filename>')
+@authorized_personnel_only
+def munin(filename=""):
+	# Checks administrative access (@authorized_personnel_only) and then just proxies
+	# the request to static files.
+	if filename == "": filename = "index.html"
+	return send_from_directory("/var/cache/munin/www", filename)
 
 # APP
 
@@ -340,4 +526,3 @@ if __name__ == '__main__':
 
 	# Start the application server. Listens on 127.0.0.1 (IPv4 only).
 	app.run(port=10222)
-

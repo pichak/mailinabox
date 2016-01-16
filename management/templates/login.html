@@ -1,12 +1,20 @@
 <h1 style="margin: 1em; text-align: center">{{hostname}}</h1>
 
-{% if no_admins_exist %}
+{% if no_users_exist or no_admins_exist %}
 <div class="row">
 <div class="col-md-offset-2 col-md-8">
+  {% if no_users_exist %}
+  <p class="text-danger">There are no users on this system! To make an administrative user,
+  log into this machine using SSH (like when you first set it up) and run:</p>
+  <pre>cd mailinabox
+sudo tools/mail.py user add me@{{hostname}}
+sudo tools/mail.py user make-admin me@{{hostname}}</pre>
+  {% else %}
   <p class="text-danger">There are no administrative users on this system! To make an administrative user,
   log into this machine using SSH (like when you first set it up) and run:</p>
   <pre>cd mailinabox
-sudo tools/mail.py user make-admin your@emailaddress.com</pre>
+sudo tools/mail.py user make-admin me@{{hostname}}</pre>
+  {% endif %}
   <hr>
 </div>
 </div>  
@@ -49,11 +57,15 @@ sudo tools/mail.py user make-admin your@emailaddress.com</pre>
 <script>
 function do_login() {
   if ($('#loginEmail').val() == "") {
-    show_modal_error("Login Failed", "Enter your email address.")
+    show_modal_error("Login Failed", "Enter your email address.", function() {
+	$('#loginEmail').focus();
+    });
     return false;
   }
   if ($('#loginPassword').val() == "") {
-    show_modal_error("Login Failed", "Enter your email password.")
+    show_modal_error("Login Failed", "Enter your email password.", function() {
+        $('#loginPassword').focus();
+    });
     return false;
   }
 
@@ -67,9 +79,16 @@ function do_login() {
   function(response){ 
     // This API call always succeeds. It returns a JSON object indicating
     // whether the request was authenticated or not.
-    if (response.status != "authorized") {
+    if (response.status != "ok") {
       // Show why the login failed.
       show_modal_error("Login Failed", response.reason)
+
+      // Reset any saved credentials.
+      do_logout();
+
+    } else if (!("api_key" in response)) {
+      // Login succeeded but user might not be authorized!
+      show_modal_error("Login Failed", "You are not an administrator on this system.")
 
       // Reset any saved credentials.
       do_logout();
@@ -78,7 +97,7 @@ function do_login() {
       // Login succeeded.
 
       // Save the new credentials.
-      api_credentials = [response.api_key, ""];
+      api_credentials = [response.email, response.api_key];
 
       // Try to wipe the username/password information.
       $('#loginEmail').val('');
@@ -110,5 +129,15 @@ function do_logout() {
   if (typeof sessionStorage != 'undefined')
     sessionStorage.removeItem("miab-cp-credentials");
   show_panel('login');
+}
+
+function show_login() {
+  $('#loginEmail,#loginPassword').each(function() {
+    var input = $(this);
+    if (!$.trim(input.val())) {
+      input.focus();
+      return false;
+    }
+  });
 }
 </script>

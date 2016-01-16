@@ -27,13 +27,15 @@ export LC_TYPE=en_US.UTF-8
 if [ -f /etc/mailinabox.conf ]; then
 	# Run any system migrations before proceeding. Since this is a second run,
 	# we assume we have Python already installed.
-	setup/migrate.py --migrate
+	setup/migrate.py --migrate || exit 1
 
 	# Load the old .conf file to get existing configuration options loaded
 	# into variables with a DEFAULT_ prefix.
 	cat /etc/mailinabox.conf | sed s/^/DEFAULT_/ > /tmp/mailinabox.prev.conf
 	source /tmp/mailinabox.prev.conf
 	rm -f /tmp/mailinabox.prev.conf
+else
+	FIRST_TIME_SETUP=1
 fi
 
 # Put a start script in a global location. We tell the user to run 'mailinabox'
@@ -45,62 +47,37 @@ source setup/start.sh
 EOF
 chmod +x /usr/local/bin/mailinabox
 
-# Ask the user for the PRIMARY_HOSTNAME, PUBLIC_IP, PUBLIC_IPV6, and CSR_COUNTRY
+# Ask the user for the PRIMARY_HOSTNAME, PUBLIC_IP, and PUBLIC_IPV6,
 # if values have not already been set in environment variables. When running
-# non-interactively, be sure to set values for all!
+# non-interactively, be sure to set values for all! Also sets STORAGE_USER and
+# STORAGE_ROOT.
 source setup/questions.sh
 
-# Automatic configuration, e.g. as used in our Vagrant configuration.
-if [ "$PUBLIC_IP" = "auto" ]; then
-	# Use a public API to get our public IP address, or fall back to local network configuration.
-	PUBLIC_IP=$(get_publicip_from_web_service 4 || get_default_privateip 4)
-fi
-if [ "$PUBLIC_IPV6" = "auto" ]; then
-	# Use a public API to get our public IPv6 address, or fall back to local network configuration.
-	PUBLIC_IPV6=$(get_publicip_from_web_service 6 || get_default_privateip 6)
-fi
-if [ "$PRIMARY_HOSTNAME" = "auto" ]; then
-	# Use reverse DNS to get this machine's hostname. Install bind9-host early.
-	hide_output apt-get -y install bind9-host
-	PRIMARY_HOSTNAME=$(get_default_hostname)
-elif [ "$PRIMARY_HOSTNAME" = "auto-easy" ]; then
-	# Generate a probably-unique subdomain under our justtesting.email domain.
-	PRIMARY_HOSTNAME=`echo $PUBLIC_IP | sha1sum | cut -c1-5`.justtesting.email
-fi
-
-# Show the configuration, since the user may have not entered it manually.
-echo
-echo "Primary Hostname: $PRIMARY_HOSTNAME"
-echo "Public IP Address: $PUBLIC_IP"
-if [ ! -z "$PUBLIC_IPV6" ]; then
-	echo "Public IPv6 Address: $PUBLIC_IPV6"
-fi
-if [ "$PRIVATE_IP" != "$PUBLIC_IP" ]; then
-	echo "Private IP Address: $PRIVATE_IP"
-fi
-if [ "$PRIVATE_IPV6" != "$PUBLIC_IPV6" ]; then
-	echo "Private IPv6 Address: $PRIVATE_IPV6"
-fi
-if [ -f /usr/bin/git ]; then
-	echo "Mail-in-a-Box Version: " $(git describe)
-fi
-echo
-
 # Run some network checks to make sure setup on this machine makes sense.
+# Skip on existing installs since we don't want this to block the ability to
+# upgrade, and these checks are also in the control panel status checks.
+if [ -z "$DEFAULT_PRIMARY_HOSTNAME" ]; then
 if [ -z "$SKIP_NETWORK_CHECKS" ]; then
-	. setup/network-checks.sh
+	source setup/network-checks.sh
+fi
 fi
 
-# Create the user named "user-data" and store all persistent user
-# data (mailboxes, etc.) in that user's home directory.
-if [ -z "$STORAGE_ROOT" ]; then
-	STORAGE_USER=user-data
-	if [ ! -d /home/$STORAGE_USER ]; then useradd -m $STORAGE_USER; fi
-	STORAGE_ROOT=/home/$STORAGE_USER
-	mkdir -p $STORAGE_ROOT
-	echo $(setup/migrate.py --current) > $STORAGE_ROOT/mailinabox.version
-	chown $STORAGE_USER:$STORAGE_USER $STORAGE_ROOT/mailinabox.version
+# Create the STORAGE_USER and STORAGE_ROOT directory if they don't already exist.
+# If the STORAGE_ROOT is missing the mailinabox.version file that lists a
+# migration (schema) number for the files stored there, assume this is a fresh
+# installation to that directory and write the file to contain the current
+# migration number for this version of Mail-in-a-Box.
+if ! id -u $STORAGE_USER >/dev/null 2>&1; then
+	useradd -m $STORAGE_USER
 fi
+if [ ! -d $STORAGE_ROOT ]; then
+	mkdir -p $STORAGE_ROOT
+fi
+if [ ! -f $STORAGE_ROOT/mailinabox.version ]; then
+	echo $(setup/migrate.py --current) > $STORAGE_ROOT/mailinabox.version
+	chown $STORAGE_USER.$STORAGE_USER $STORAGE_ROOT/mailinabox.version
+fi
+
 
 # Save the global options in /etc/mailinabox.conf so that standalone
 # tools know where to look for data.
@@ -112,7 +89,6 @@ PUBLIC_IP=$PUBLIC_IP
 PUBLIC_IPV6=$PUBLIC_IPV6
 PRIVATE_IP=$PRIVATE_IP
 PRIVATE_IPV6=$PRIVATE_IPV6
-CSR_COUNTRY=$CSR_COUNTRY
 EOF
 
 # Start service configuration.
@@ -129,12 +105,20 @@ source setup/webmail.sh
 source setup/owncloud.sh
 source setup/zpush.sh
 source setup/management.sh
+source setup/munin.sh
 
-# Write the DNS and nginx configuration files.
-sleep 10 # wait for the daemon to start
+# Ping the management daemon to write the DNS and nginx configuration files.
+until nc -z -w 4 localhost 10222
+do
+	echo Waiting for the Mail-in-a-Box management daemon to start...
+	sleep 2
+done
+tools/dns_update
+tools/web_update
 
-curl -s -d POSTDATA --user $(</var/lib/mailinabox/api.key): http://127.0.0.1:10222/dns/update
-curl -s -d POSTDATA --user $(</var/lib/mailinabox/api.key): http://127.0.0.1:10222/web/update
+# If DNS is already working, try to provision TLS certficates from Let's Encrypt.
+# Suppress extra reasons why domains aren't getting a new certificate.
+management/ssl_certificates.py -q
 
 # If there aren't any mail users yet, create one.
 source setup/firstuser.sh
@@ -151,17 +135,19 @@ if management/status_checks.py --check-primary-hostname; then
 	# Show the nice URL if it appears to be resolving and has a valid certificate.
 	echo https://$PRIMARY_HOSTNAME/admin
 	echo
-	echo If you have a DNS problem use the box\'s IP address and check the SSL fingerprint:
-	echo https://$PUBLIC_IP/admin
+	echo "If you have a DNS problem put the box's IP address in the URL"
+	echo "(https://$PUBLIC_IP/admin) but then check the SSL fingerprint:"
+	openssl x509 -in $STORAGE_ROOT/ssl/ssl_certificate.pem -noout -fingerprint \
+        	| sed "s/SHA1 Fingerprint=//"
 else
 	echo https://$PUBLIC_IP/admin
 	echo
 	echo You will be alerted that the website has an invalid certificate. Check that
 	echo the certificate fingerprint matches:
 	echo
+	openssl x509 -in $STORAGE_ROOT/ssl/ssl_certificate.pem -noout -fingerprint \
+        	| sed "s/SHA1 Fingerprint=//"
+	echo
+	echo Then you can confirm the security exception and continue.
+	echo
 fi
-openssl x509 -in $STORAGE_ROOT/ssl/ssl_certificate.pem -noout -fingerprint \
-        | sed "s/SHA1 Fingerprint=//"
-echo
-echo Then you can confirm the security exception and continue.
-echo

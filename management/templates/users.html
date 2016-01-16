@@ -1,18 +1,17 @@
 <h2>Users</h2>
 
 <style>
+#user_table h4 { margin: 1em 0 0 0; }
 #user_table tr.account_inactive td.address { color: #888; text-decoration: line-through; }
-#user_table .aliases { font-size: 90%; }
-#user_table .aliases div:before { content: "⇖ "; }
-#user_table .aliases div {  }
 #user_table .actions { margin-top: .33em; font-size: 95%; }
 #user_table .account_inactive .if_active { display: none; }
 #user_table .account_active .if_inactive { display: none; }
+#user_table .account_active.if_inactive { display: none; }
 </style>
 
 <h3>Add a mail user</h3>
 
-<p>Add an email address to this system. This will create a new login username/password. (Use <a href="javascript:show_panel('aliases')">aliases</a> to create email addresses that forward to existing accounts.)</p>
+<p>Add an email address to this system. This will create a new login username/password.</p>
 
 <form class="form-inline" role="form" onsubmit="return do_add_user(); return false;">
   <div class="form-group">
@@ -31,10 +30,12 @@
   </div>
   <button type="submit" class="btn btn-primary">Add User</button>
 </form>
-<p style="margin-top: .5em"><small>
-  Passwords must be at least four characters and may not contain spaces.
-  Administrators get access to this control panel.
-</small></p>
+<ul style="margin-top: 1em; padding-left: 1.5em; font-size: 90%;">
+  <li>Passwords must be at least four characters and may not contain spaces. For best results, <a href="#" onclick="return generate_random_password()">generate a random password</a>.</li>
+  <li>Use <a href="#" onclick="return show_panel('aliases')">aliases</a> to create email addresses that forward to existing accounts.</li>
+  <li>Administrators get access to this control panel.</li>
+  <li>User accounts cannot contain any international (non-ASCII) characters, but <a href="#" onclick="return show_panel('aliases');">aliases</a> can.</li>
+</ul>
 
 <h3>Existing mail users</h3>
 <table id="user_table" class="table" style="width: auto">
@@ -75,11 +76,9 @@
     <td class='mailboxsize'>
     </td>
   </tr>
-  <tr id="user-extra-template">
-    <td colspan="3" style="border-top: 0; padding-top: 0">
-      <div class='if_inactive restore_info' style='color: #888; font-size: 90%'>To restore account, create a new account with this email address. Or to permanently delete the mailbox, delete the directory <tt></tt> on the machine.</div>
-
-      <div class='aliases' style='display: none'> </div>
+  <tr id="user-extra-template" class="if_inactive">
+    <td colspan="3" style="border: 0; padding-top: 0">
+      <div class='restore_info' style='color: #888; font-size: 90%'>To restore account, create a new account with this email address. Or to permanently delete the mailbox, delete the directory <tt></tt> on the machine.</div>
     </td>
   </tr>
   </table>
@@ -96,7 +95,7 @@ function show_users() {
     function(r) {
       $('#user_table tbody').html("");
       for (var i = 0; i < r.length; i++) {
-        var hdr = $("<tr><td><h4/></td></tr>");
+        var hdr = $("<tr><td colspan='3'><h4/></td></tr>");
         hdr.find('h4').text(r[i].domain);
         $('#user_table tbody').append(hdr);
 
@@ -135,16 +134,6 @@ function show_users() {
             p.find('span.name').text(add_privs[j]);
             n.find('.add-privs').append(p);
           }
-
-          if (user.aliases && user.aliases.length > 0) {
-            n2.find('.aliases').show();
-            for (var j = 0; j < user.aliases.length; j++) {
-              n2.find('.aliases').append($("<div/>").text(
-                user.aliases[j][0]
-                + (user.aliases[j][1].length > 0 ? " ⇐ " + user.aliases[j][1].join(", ") : "")
-                ))
-            }
-          }
         }
       }
     })
@@ -175,9 +164,14 @@ function do_add_user() {
 
 function users_set_password(elem) {
   var email = $(elem).parents('tr').attr('data-email');
+
+  var yourpw = "";
+  if (api_credentials != null && email == api_credentials[0])
+    yourpw = "<p class='text-danger'>If you change your own password, you will be logged out of this control panel and will need to log in again.</p>";
+
   show_modal_confirm(
     "Archive User",
-    $("<p>Set a new password for <b>" + email + "</b>?</p> <p><label for='users_set_password_pw' style='display: block; font-weight: normal'>New Password:</label><input type='password' id='users_set_password_pw'></p><p><small>Passwords must be at least four characters and may not contain spaces.</small></p>"),
+    $("<p>Set a new password for <b>" + email + "</b>?</p> <p><label for='users_set_password_pw' style='display: block; font-weight: normal'>New Password:</label><input type='password' id='users_set_password_pw'></p><p><small>Passwords must be at least four characters and may not contain spaces.</small>" + yourpw + "</p>"),
     "Set Password",
     function() {
       api(
@@ -199,6 +193,13 @@ function users_set_password(elem) {
 
 function users_remove(elem) {
   var email = $(elem).parents('tr').attr('data-email');
+
+  // can't remove yourself
+  if (api_credentials != null && email == api_credentials[0]) {
+    show_modal_error("Archive User", "You cannot archive your own account.");
+    return;
+  }
+
   show_modal_confirm(
     "Archive User",
     $("<p>Are you sure you want to archive <b>" + email + "</b>?</p> <p>The user's mailboxes will not be deleted (you can do that later), but the user will no longer be able to log into any services on this machine.</p>"),
@@ -234,7 +235,7 @@ function mod_priv(elem, add_remove) {
   var add_remove1 = add_remove.charAt(0).toUpperCase() + add_remove.substring(1);
   show_modal_confirm(
     "Modify Privileges",
-    "Are you sure you want to " + add_remove + " the " + priv + " privilege for <b>" + email + "</b>?",
+    $("<p>Are you sure you want to " + add_remove + " the " + priv + " privilege for <b>" + email + "</b>?</p>"),
     add_remove1,
     function() {
       api(
@@ -248,5 +249,14 @@ function mod_priv(elem, add_remove) {
           show_users();
         });
     });
+}
+
+function generate_random_password() {
+  var pw = "";
+  var charset = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"; // confusable characters skipped
+  for (var i = 0; i < 10; i++)
+    pw += charset.charAt(Math.floor(Math.random() * charset.length));
+  show_modal_error("Random Password", "<p>Here, try this:</p> <p><code style='font-size: 110%'>" + pw + "</code></pr");
+  return false; // cancel click
 }
 </script>

@@ -14,6 +14,8 @@
 #
 # NAME VALUE
 #
+# If the -c option is given, then the supplied character becomes the comment character
+#
 # If the -w option is given, then setting lines continue onto following
 # lines while the lines start with whitespace, e.g.:
 #
@@ -24,7 +26,7 @@ import sys, re
 
 # sanity check
 if len(sys.argv) < 3:
-	print("usage: python3 editconf.py /etc/file.conf [-s] [-w] [-t] NAME=VAL [NAME=VAL ...]")
+	print("usage: python3 editconf.py /etc/file.conf [-s] [-w] [-c <CHARACTER>] [-t] NAME=VAL [NAME=VAL ...]")
 	sys.exit(1)
 
 # parse command line arguments
@@ -53,6 +55,14 @@ while settings[0][0] == "-" and settings[0] != "--":
 	else:
 		print("Invalid option.")
 		sys.exit(1)
+
+# sanity check command line
+for setting in settings:
+	try:
+		name, value = setting.split("=", 1)
+	except:
+		import subprocess
+		print("Invalid command line: ", subprocess.list2cmdline(sys.argv))
 
 # create the new config file in memory
 

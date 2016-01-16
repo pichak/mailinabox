@@ -16,19 +16,40 @@ source setup/functions.sh # load our functions
 # ----------------------------------------
 
 # Install packages.
-apt_install spampd razor pyzor dovecot-antispam
+# libmail-dkim-perl is needed to make the spamassassin DKIM module work.
+# For more information see Debian Bug #689414:
+# https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=689414
+echo "Installing SpamAssassin..."
+apt_install spampd razor pyzor dovecot-antispam libmail-dkim-perl
 
 # Allow spamassassin to download new rules.
 tools/editconf.py /etc/default/spamassassin \
 	CRON=1
 
-# Configure pyzor.
-hide_output pyzor discover
+# Configure pyzor, which is a client to a live database of hashes of
+# spam emails. Set the pyzor configuration directory to something sane.
+# The default is ~/.pyzor. We used to use that, so we'll kill that old
+# directory. Then write the public pyzor server to its servers file.
+# That will prevent an automatic download on first use, and also means
+# we can skip 'pyzor discover', both of which are currently broken by
+# something happening on Sourceforge (#496).
+rm -rf ~/.pyzor
+tools/editconf.py /etc/spamassassin/local.cf -s \
+	pyzor_options="--homedir /etc/spamassassin/pyzor"
+mkdir -p /etc/spamassassin/pyzor
+echo "public.pyzor.org:24441" > /etc/spamassassin/pyzor/servers
+# check with: pyzor --homedir /etc/mail/spamassassin/pyzor ping
 
-# Pass messages on to docevot on port 10026.
-# This is actually the default setting but we don't want to lose track of it.
-# We've already configured Dovecot to listen on this port.
-tools/editconf.py /etc/default/spampd DESTPORT=10026
+# Configure spampd:
+# * Pass messages on to docevot on port 10026. This is actually the default setting but we don't
+#   want to lose track of it. (We've configured Dovecot to listen on this port elsewhere.)
+# * Increase the maximum message size of scanned messages from the default of 64KB to 500KB, which
+#   is Spamassassin (spamc)'s own default. Specified in KBytes.
+# * Disable localmode so Pyzor, DKIM and DNS checks can be used.
+tools/editconf.py /etc/default/spampd \
+	DESTPORT=10026 \
+	ADDOPTS="\"--maxsize=500\"" \
+	LOCALONLY=0
 
 # Spamassassin normally wraps spam as an attachment inside a fresh
 # email with a report about the message. This also protects the user
@@ -71,12 +92,14 @@ chown -R spampd:spampd $STORAGE_ROOT/mail/spamassassin
 # Enable the Dovecot antispam plugin.
 # (Be careful if we use multiple plugins later.) #NODOC
 sed -i "s/#mail_plugins = .*/mail_plugins = \$mail_plugins antispam/" /etc/dovecot/conf.d/20-imap.conf
+sed -i "s/#mail_plugins = .*/mail_plugins = \$mail_plugins antispam/" /etc/dovecot/conf.d/20-pop3.conf
 
 # Configure the antispam plugin to call sa-learn-pipe.sh.
 cat > /etc/dovecot/conf.d/99-local-spampd.conf << EOF;
 plugin {
     antispam_backend = pipe
     antispam_spam_pattern_ignorecase = SPAM
+    antispam_trash_pattern_ignorecase = trash;Deleted *
     antispam_allow_append_to_spam = yes
     antispam_pipe_program_spam_args = /usr/local/bin/sa-learn-pipe.sh;--spam
     antispam_pipe_program_notspam_args = /usr/local/bin/sa-learn-pipe.sh;--ham

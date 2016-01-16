@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-import sys, getpass, urllib.request, urllib.error, json
+import sys, getpass, urllib.request, urllib.error, json, re
 
 def mgmt(cmd, data=None, is_json=False):
 	# The base URL for the management daemon. (Listens on IPv4 only.)
@@ -28,13 +28,20 @@ def mgmt(cmd, data=None, is_json=False):
 	return resp
 
 def read_password():
-	first  = getpass.getpass('password: ')
-	second = getpass.getpass(' (again): ')
-	while first != second:
-		print('Passwords not the same. Try again.')
-		first  = getpass.getpass('password: ')
-		second = getpass.getpass(' (again): ')
-	return first
+    while True:
+        first = getpass.getpass('password: ')
+        if len(first) < 4:
+            print("Passwords must be at least four characters.")
+            continue
+        if re.search(r'[\s]', first):
+            print("Passwords cannot contain spaces.")
+            continue
+        second = getpass.getpass(' (again): ')
+        if first != second:
+            print("Passwords not the same. Try again.")
+            continue
+        break
+    return first
 
 def setup_key_auth(mgmt_uri):
 	key = open('/var/lib/mailinabox/api.key').read().strip()
@@ -113,10 +120,10 @@ elif sys.argv[1] == "alias" and len(sys.argv) == 2:
 	print(mgmt("/mail/aliases"))
 
 elif sys.argv[1] == "alias" and sys.argv[2] == "add" and len(sys.argv) == 5:
-	print(mgmt("/mail/aliases/add", { "source": sys.argv[3], "destination": sys.argv[4] }))
+	print(mgmt("/mail/aliases/add", { "address": sys.argv[3], "forwards_to": sys.argv[4] }))
 
 elif sys.argv[1] == "alias" and sys.argv[2] == "remove" and len(sys.argv) == 4:
-	print(mgmt("/mail/aliases/remove", { "source": sys.argv[3] }))
+	print(mgmt("/mail/aliases/remove", { "address": sys.argv[3] }))
 
 else:
 	print("Invalid command-line arguments.")

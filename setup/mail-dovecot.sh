@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# Dovecot (IMAP and LDA)
+# Dovecot (IMAP/POP and LDA)
 # ----------------------
 #
-# Dovecot is *both* the IMAP server (the protocol that email applications
+# Dovecot is *both* the IMAP/POP server (the protocol that email applications
 # use to query a mailbox) as well as the local delivery agent (LDA),
 # meaning it is responsible for writing emails to mailbox storage on disk.
 # You could imagine why these things would be bundled together.
@@ -18,13 +18,18 @@
 source setup/functions.sh # load our functions
 source /etc/mailinabox.conf # load global vars
 
-# Install packages...
 
+# Install packages for dovecot. These are all core dovecot plugins,
+# but dovecot-lucene is packaged by *us* in the Mail-in-a-Box PPA,
+# not by Ubuntu.
+
+echo "Installing Dovecot (IMAP server)..."
 apt_install \
-	dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sqlite sqlite3 \
-	dovecot-sieve dovecot-managesieved
+	dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-sqlite sqlite3 \
+	dovecot-sieve dovecot-managesieved dovecot-lucene
 
-# The `dovecot-imapd` and `dovecot-lmtpd` packages automatically enable IMAP and LMTP protocols.
+# The `dovecot-imapd`, `dovecot-pop3d`, and `dovecot-lmtpd` packages automatically
+# enable IMAP, POP and LMTP protocols.
 
 # Set basic daemon options.
 
@@ -51,7 +56,10 @@ tools/editconf.py /etc/dovecot/conf.d/10-mail.conf \
 	mail_privileged_group=mail \
 	first_valid_uid=0
 
-# ### IMAP
+# Create, subscribe, and mark as special folders: INBOX, Drafts, Sent, Trash, Spam and Archive.
+cp conf/dovecot-mailboxes.conf /etc/dovecot/conf.d/15-mailboxes.conf
+
+# ### IMAP/POP
 
 # Require that passwords are sent over SSL only, and allow the usual IMAP authentication mechanisms.
 # The LOGIN mechanism is supposedly for Microsoft products like Outlook to do SMTP login (I guess
@@ -69,9 +77,9 @@ tools/editconf.py /etc/dovecot/conf.d/10-ssl.conf \
 	"ssl_protocols=!SSLv3 !SSLv2" \
 	"ssl_cipher_list=TLSv1+HIGH !SSLv2 !RC4 !aNULL !eNULL !3DES @STRENGTH"
 
-# Disable in-the-clear IMAP because there is no reason for a user to transmit
-# login credentials outside of an encrypted connection. Although we haven't
-# even installed the POP server, ensure it is disabled too.
+# Disable in-the-clear IMAP/POP because there is no reason for a user to transmit
+# login credentials outside of an encrypted connection. Only the over-TLS versions
+# are made available (IMAPS on port 993; POP3S on port 995).
 sed -i "s/#port = 143/port = 0/" /etc/dovecot/conf.d/10-master.conf
 sed -i "s/#port = 110/port = 0/" /etc/dovecot/conf.d/10-master.conf
 
@@ -80,9 +88,28 @@ sed -i "s/#port = 110/port = 0/" /etc/dovecot/conf.d/10-master.conf
 # this are minimal. But for good measure, let's go to 4 minutes to halve the
 # bandwidth and number of times the device's networking might be woken up.
 # The risk is that if the connection is silent for too long it might be reset
-# by a peer. See #129 and http://razor.occams.info/blog/2014/08/09/how-bad-is-imap-idle/.
+# by a peer. See [#129](https://github.com/mail-in-a-box/mailinabox/issues/129)
+# and [How bad is IMAP IDLE](http://razor.occams.info/blog/2014/08/09/how-bad-is-imap-idle/).
 tools/editconf.py /etc/dovecot/conf.d/20-imap.conf \
 	imap_idle_notify_interval="4 mins"
+
+# Set POP3 UIDL.
+# UIDLs are used by POP3 clients to keep track of what messages they've downloaded.
+# For new POP3 servers, the easiest way to set up UIDLs is to use IMAP's UIDVALIDITY
+# and UID values, the default in Dovecot.
+tools/editconf.py /etc/dovecot/conf.d/20-pop3.conf \
+	pop3_uidl_format="%08Xu%08Xv"
+
+# Full Text Search - Enable full text search of mail using dovecot's lucene plugin,
+# which *we* package and distribute (dovecot-lucene package).
+tools/editconf.py /etc/dovecot/conf.d/10-mail.conf \
+	mail_plugins="\$mail_plugins fts fts_lucene"
+cat > /etc/dovecot/conf.d/90-plugin-fts.conf << EOF;
+plugin {
+  fts = lucene
+  fts_lucene = whitespace_chars=@.
+}
+EOF
 
 # ### LDA (LMTP)
 
@@ -128,6 +155,12 @@ sed -i "s/#mail_plugins = .*/mail_plugins = \$mail_plugins sieve/" /etc/dovecot/
 #
 # * `sieve_before`: The path to our global sieve which handles moving spam to the Spam folder.
 #
+# * `sieve_before2`: The path to our global sieve directory for sieve which can contain .sieve files
+# to run globally for every user before their own sieve files run.
+#
+# * `sieve_after`: The path to our global sieve directory which can contain .sieve files
+# to run globally for every user after their own sieve files run.
+#
 # * `sieve`: The path to the user's main active script. ManageSieve will create a symbolic
 # link here to the actual sieve script. It should not be in the mailbox directory
 # (because then it might appear as a folder) and it should not be in the sieve_dir
@@ -137,6 +170,8 @@ sed -i "s/#mail_plugins = .*/mail_plugins = \$mail_plugins sieve/" /etc/dovecot/
 cat > /etc/dovecot/conf.d/99-local-sieve.conf << EOF;
 plugin {
   sieve_before = /etc/dovecot/sieve-spam.sieve
+  sieve_before2 = $STORAGE_ROOT/mail/sieve/global_before
+  sieve_after = $STORAGE_ROOT/mail/sieve/global_after
   sieve = $STORAGE_ROOT/mail/sieve/%d/%n.sieve
   sieve_dir = $STORAGE_ROOT/mail/sieve/%d/%n
 }
@@ -160,10 +195,16 @@ chown -R mail.mail $STORAGE_ROOT/mail/mailboxes
 
 # Same for the sieve scripts.
 mkdir -p $STORAGE_ROOT/mail/sieve
+mkdir -p $STORAGE_ROOT/mail/sieve/global_before
+mkdir -p $STORAGE_ROOT/mail/sieve/global_after
 chown -R mail.mail $STORAGE_ROOT/mail/sieve
 
-# Allow the IMAP port in the firewall.
+# Allow the IMAP/POP ports in the firewall.
 ufw_allow imaps
+ufw_allow pop3s
+
+# Allow the Sieve port in the firewall.
+ufw_allow sieve
 
 # Restart services.
 restart_service dovecot

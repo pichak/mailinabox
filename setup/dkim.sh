@@ -10,7 +10,8 @@ source setup/functions.sh # load our functions
 source /etc/mailinabox.conf # load global vars
 
 # Install DKIM...
-apt_install opendkim opendkim-tools
+echo Installing OpenDKIM/OpenDMARC...
+apt_install opendkim opendkim-tools opendmarc
 
 # Make sure configuration directories exist.
 mkdir -p /etc/opendkim;
@@ -35,28 +36,47 @@ RequireSafeKeys         false
 EOF
 fi
 
-# Create a new DKIM key. This creates
-# mail.private and mail.txt in $STORAGE_ROOT/mail/dkim. The former
-# is the actual private key and the latter is the suggested DNS TXT
-# entry which we'll want to include in our DNS setup.
+# Create a new DKIM key. This creates mail.private and mail.txt
+# in $STORAGE_ROOT/mail/dkim. The former is the private key and
+# the latter is the suggested DNS TXT entry which we'll include
+# in our DNS setup. Note tha the files are named after the
+# 'selector' of the key, which we can change later on to support
+# key rotation.
+#
+# A 1024-bit key is seen as a minimum standard by several providers
+# such as Google. But they and others use a 2048 bit key, so we'll
+# do the same. Keys beyond 2048 bits may exceed DNS record limits.
 if [ ! -f "$STORAGE_ROOT/mail/dkim/mail.private" ]; then
-	# Should we specify -h rsa-sha256?
-	opendkim-genkey -r -s mail -D $STORAGE_ROOT/mail/dkim
+	opendkim-genkey -b 2048 -r -s mail -D $STORAGE_ROOT/mail/dkim
 fi
 
 # Ensure files are owned by the opendkim user and are private otherwise.
 chown -R opendkim:opendkim $STORAGE_ROOT/mail/dkim
 chmod go-rwx $STORAGE_ROOT/mail/dkim
 
-# Add OpenDKIM as a milter to postfix, which is how it intercepts outgoing
-# mail to perform the signing (by adding a mail header).
-# Be careful. If we add other milters later, it needs to be concatenated on the smtpd_milters line. #NODOC
+tools/editconf.py /etc/opendmarc.conf -s \
+	"Syslog=true" \
+	"Socket=inet:8893@[127.0.0.1]"
+
+# Add OpenDKIM and OpenDMARC as milters to postfix, which is how OpenDKIM
+# intercepts outgoing mail to perform the signing (by adding a mail header)
+# and how they both intercept incoming mail to add Authentication-Results
+# headers. The order possibly/probably matters: OpenDMARC relies on the
+# OpenDKIM Authentication-Results header already being present.
+#
+# Be careful. If we add other milters later, this needs to be concatenated
+# on the smtpd_milters line.
+#
+# The OpenDMARC milter is skipped in the SMTP submission listener by
+# configuring smtpd_milters there to only list the OpenDKIM milter
+# (see mail-postfix.sh).
 tools/editconf.py /etc/postfix/main.cf \
-	smtpd_milters=inet:127.0.0.1:8891 \
+	"smtpd_milters=inet:127.0.0.1:8891 inet:127.0.0.1:8893"\
 	non_smtpd_milters=\$smtpd_milters \
 	milter_default_action=accept
 
 # Restart services.
 restart_service opendkim
+restart_service opendmarc
 restart_service postfix
 
