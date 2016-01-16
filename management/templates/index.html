@@ -9,17 +9,10 @@
 
         <meta name="robots" content="noindex, nofollow">
 
-        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.0/css/bootstrap.min.css">
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap.min.css" integrity="sha256-MfvZlkHCEqatNoGiOXveE8FIwMzZg4W85qfrfIFBfYc=" crossorigin="anonymous">
         <style>
-            @import url(https://fonts.googleapis.com/css?family=Raleway:400,700);
-            @import url(https://fonts.googleapis.com/css?family=Ubuntu:300);
-
-	    html {
+	    body {
 		overflow-y: scroll;
-	    }
-
-            body {
-                padding-top: 50px;
                 padding-bottom: 20px;
             }
 
@@ -28,7 +21,7 @@
             }
 
             h1, h2, h3, h4 {
-              font-family: Raleway, sans-serif;
+              font-family: sans-serif;
               font-weight: bold;
             }
 
@@ -70,15 +63,14 @@
 	       margin-bottom: 1em;
 	    }
         </style>
-        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.0/css/bootstrap-theme.min.css">
-        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css">
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap-theme.min.css" integrity="sha256-bHQiqcFbnJb1Qhh61RY9cMh6kR0gTuQY6iFOBj1yj00=" crossorigin="anonymous">
     </head>
     <body>
 
     <!--[if lt IE 8]><p>Internet Explorer version 8 or any modern web browser is required to use this website, sorry.<![endif]-->
     <!--[if gt IE 7]><!-->
 
-    <div class="navbar navbar-inverse navbar-fixed-top" role="navigation">
+    <div class="navbar navbar-inverse navbar-static-top" role="navigation">
       <div class="container">
         <div class="navbar-header">
           <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target=".navbar-collapse">
@@ -95,12 +87,13 @@
               <a href="#" class="dropdown-toggle" data-toggle="dropdown">System <b class="caret"></b></a>
               <ul class="dropdown-menu">
                 <li><a href="#system_status" onclick="return show_panel(this);">Status Checks</a></li>
-                <li><a href="#ssl" onclick="return show_panel(this);">SSL Certificates</a></li>
+                <li><a href="#tls" onclick="return show_panel(this);">TLS (SSL) Certificates</a></li>
                 <li><a href="#system_backup" onclick="return show_panel(this);">Backup Status</a></li>
                 <li class="divider"></li>
-                <li class="dropdown-header">Advanced Options</li>
+                <li class="dropdown-header">Advanced Pages</li>
                 <li><a href="#custom_dns" onclick="return show_panel(this);">Custom DNS</a></li>
                 <li><a href="#external_dns" onclick="return show_panel(this);">External DNS</a></li>
+                <li><a href="/admin/munin">Munin Monitoring</a></li>
               </ul>
             </li>
             <li class="dropdown">
@@ -162,7 +155,7 @@
       {% include "web.html" %}
       </div>
 
-      <div id="panel_ssl" class="admin_panel">
+      <div id="panel_tls" class="admin_panel">
       {% include "ssl.html" %}
       </div>
 
@@ -198,8 +191,8 @@
           </div>
         </div>
 
-        <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.1/jquery.min.js"></script>
-        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.0/js/bootstrap.min.js"></script>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js" integrity="sha256-rsPUGdUPBXgalvIj4YKJrrUlmLXbOb6Cp7cdxn1qeUc=" crossorigin="anonymous"></script>
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/js/bootstrap.min.js" integrity="sha256-Sk3nkD6mLTMOF0EOpNtsIry+s1CsaqQC1rVLTAy+0yc=" crossorigin="anonymous"></script>
 
         <script>
 var global_modal_state = null;
@@ -209,8 +202,8 @@ $(function() {
   $('#global_modal').on('shown.bs.modal', function (e) {
     // set focus to first input in the global modal's body
     var input = $('#global_modal .modal-body input');
-    if (input.length > 0) $(input[0]).focus();  
-  })  
+    if (input.length > 0) $(input[0]).focus();
+  })
   $('#global_modal .btn-danger').click(function() {
     // Don't take action now. Wait for the modal to be totally hidden
     // so that we don't attempt to show another modal while this one
@@ -270,7 +263,7 @@ function show_modal_confirm(title, question, verb, yes_callback, cancel_callback
 }
 
 var ajax_num_executing_requests = 0;
-function ajax(options) {
+function ajax_with_indicator(options) {
   setTimeout("if (ajax_num_executing_requests > 0) $('#ajax_loading_indicator').fadeIn()", 100);
   function hide_loading_indicator() {
     ajax_num_executing_requests--;
@@ -332,7 +325,7 @@ function api(url, method, data, callback, callback_error) {
       show_modal_error("Error", "Something went wrong, sorry.")
   }
 
-  ajax({
+  ajax_with_indicator({
     url: "/admin" + url,
     method: method,
     cache: false,

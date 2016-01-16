@@ -95,6 +95,47 @@ def migration_7(env):
 	# Save.
 	conn.commit()
 
+def migration_8(env):
+	# Delete DKIM keys. We had generated 1024-bit DKIM keys.
+	# By deleting the key file we'll automatically generate
+	# a new key, which will be 2048 bits.
+	os.unlink(os.path.join(env['STORAGE_ROOT'], 'mail/dkim/mail.private'))
+
+def migration_9(env):
+	# Add a column to the aliases table to store permitted_senders,
+	# which is a list of user account email addresses that are
+	# permitted to send mail using this alias instead of their own
+	# address. This was motivated by the addition of #427 ("Reject
+	# outgoing mail if FROM does not match Login") - which introduced
+	# the notion of outbound permitted-senders.
+	db = os.path.join(env["STORAGE_ROOT"], 'mail/users.sqlite')
+	shell("check_call", ["sqlite3", db, "ALTER TABLE aliases ADD permitted_senders TEXT"])
+
+def migration_10(env):
+	# Clean up the SSL certificates directory.
+
+	# Move the primary certificate to a new name and then
+	# symlink it to the system certificate path.
+	import datetime
+	system_certificate = os.path.join(env["STORAGE_ROOT"], 'ssl/ssl_certificate.pem')
+	if not os.path.islink(system_certificate): # not already a symlink
+		new_path = os.path.join(env["STORAGE_ROOT"], 'ssl', env['PRIMARY_HOSTNAME'] + "-" + datetime.datetime.now().date().isoformat().replace("-", "") + ".pem")
+		print("Renamed", system_certificate, "to", new_path, "and created a symlink for the original location.")
+		shutil.move(system_certificate, new_path)
+		os.symlink(new_path, system_certificate)
+
+	# Flatten the directory structure. For any directory
+	# that contains a single file named ssl_certificate.pem,
+	# move the file out and name it the same as the directory,
+	# and remove the directory.
+	for sslcert in glob.glob(os.path.join( env["STORAGE_ROOT"], 'ssl/*/ssl_certificate.pem' )):
+		d = os.path.dirname(sslcert)
+		if len(os.listdir(d)) == 1:
+			# This certificate is the only file in that directory.
+			newname = os.path.join(env["STORAGE_ROOT"], 'ssl', os.path.basename(d) + '.pem')
+			if not os.path.exists(newname):
+				shutil.move(sslcert, newname)
+				os.rmdir(d)
 
 def get_current_migration():
 	ver = 0

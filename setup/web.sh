@@ -17,6 +17,7 @@ fi
 #
 # Turn off nginx's default website.
 
+echo "Installing Nginx (web server)..."
 apt_install nginx php5-fpm
 
 rm -f /etc/nginx/sites-enabled/default
@@ -24,13 +25,27 @@ rm -f /etc/nginx/sites-enabled/default
 # Copy in a nginx configuration file for common and best-practices
 # SSL settings from @konklone. Replace STORAGE_ROOT so it can find
 # the DH params.
+rm -f /etc/nginx/nginx-ssl.conf # we used to put it here
 sed "s#STORAGE_ROOT#$STORAGE_ROOT#" \
-	conf/nginx-ssl.conf > /etc/nginx/nginx-ssl.conf
+	conf/nginx-ssl.conf > /etc/nginx/conf.d/ssl.conf
 
 # Fix some nginx defaults.
-# The server_names_hash_bucket_size seems to prevent long domain names?
+# The server_names_hash_bucket_size seems to prevent long domain names!
+# The default, according to nginx's docs, depends on "the size of the
+# processor’s cache line." It could be as low as 32. We fixed it at
+# 64 in 2014 to accommodate a long domain name (20 characters?). But
+# even at 64, a 58-character domain name won't work (#93), so now
+# we're going up to 128.
 tools/editconf.py /etc/nginx/nginx.conf -s \
-	server_names_hash_bucket_size="64;"
+	server_names_hash_bucket_size="128;"
+
+# Tell PHP not to expose its version number in the X-Powered-By header.
+tools/editconf.py /etc/php5/fpm/php.ini -c ';' \
+	expose_php=Off
+
+# Set PHPs default charset to UTF-8, since we use it. See #367.
+tools/editconf.py /etc/php5/fpm/php.ini -c ';' \
+        default_charset="UTF-8"
 
 # Bump up PHP's max_children to support more concurrent connections
 tools/editconf.py /etc/php5/fpm/pool.d/www.conf -c ';' \

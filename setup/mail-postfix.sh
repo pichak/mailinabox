@@ -41,7 +41,15 @@ source /etc/mailinabox.conf # load global vars
 #   always will.
 # * `ca-certificates`: A trust store used to squelch postfix warnings about
 #   untrusted opportunistically-encrypted connections.
+#
+# postgrey is going to come in via the Mail-in-a-Box PPA, which publishes
+# a modified version of postgrey that lets senders whitelisted by dnswl.org
+# pass through without being greylisted. So please note [dnswl's license terms](https://www.dnswl.org/?page_id=9):
+# > Every user with more than 100’000 queries per day on the public nameserver
+# > infrastructure and every commercial vendor of dnswl.org data (eg through
+# > anti-spam solutions) must register with dnswl.org and purchase a subscription.
 
+echo "Installing Postfix (SMTP server)..."
 apt_install postfix postfix-pcre postgrey ca-certificates
 
 # ### Basic Settings
@@ -85,6 +93,12 @@ tools/editconf.py /etc/postfix/master.cf -s -w \
 
 # Install the `outgoing_mail_header_filters` file required by the new 'authclean' service.
 cp conf/postfix_outgoing_mail_header_filters /etc/postfix/outgoing_mail_header_filters
+
+# Modify the `outgoing_mail_header_filters` file to use the local machine name and ip 
+# on the first received header line.  This may help reduce the spam score of email by
+# removing the 127.0.0.1 reference.
+sed -i "s/PRIMARY_HOSTNAME/$PRIMARY_HOSTNAME/" /etc/postfix/outgoing_mail_header_filters
+sed -i "s/PUBLIC_IP/$PUBLIC_IP/" /etc/postfix/outgoing_mail_header_filters
 
 # Enable TLS on these and all other connections (i.e. ports 25 *and* 587) and
 # require TLS before a user is allowed to authenticate. This also makes
@@ -153,6 +167,7 @@ tools/editconf.py /etc/postfix/main.cf virtual_transport=lmtp:[127.0.0.1]:10025
 #
 # * `reject_non_fqdn_sender`: Reject not-nice-looking return paths.
 # * `reject_unknown_sender_domain`: Reject return paths with invalid domains.
+# * `reject_authenticated_sender_login_mismatch`: Reject if mail FROM address does not match the client SASL login
 # * `reject_rhsbl_sender`: Reject return paths that use blacklisted domains.
 # * `permit_sasl_authenticated`: Authenticated users (i.e. on port 587) can skip further checks.
 # * `permit_mynetworks`: Mail that originates locally can skip further checks.
@@ -166,7 +181,7 @@ tools/editconf.py /etc/postfix/main.cf virtual_transport=lmtp:[127.0.0.1]:10025
 # whitelisted) then postfix does a DEFER_IF_REJECT, which results in all "unknown user" sorts of messages turning into #NODOC
 # "450 4.7.1 Client host rejected: Service unavailable". This is a retry code, so the mail doesn't properly bounce. #NODOC
 tools/editconf.py /etc/postfix/main.cf \
-	smtpd_sender_restrictions="reject_non_fqdn_sender,reject_unknown_sender_domain,reject_rhsbl_sender dbl.spamhaus.org,reject_sender_login_mismatch" \
+	smtpd_sender_restrictions="reject_non_fqdn_sender,reject_unknown_sender_domain,reject_authenticated_sender_login_mismatch,reject_rhsbl_sender dbl.spamhaus.org" \
 	smtpd_recipient_restrictions=permit_sasl_authenticated,permit_mynetworks,"reject_rbl_client zen.spamhaus.org",reject_unlisted_recipient,"check_policy_service inet:127.0.0.1:10023"
 
 # Postfix connects to Postgrey on the 127.0.0.1 interface specifically. Ensure that

@@ -1,34 +1,29 @@
-# Fail2Ban configuration file.
-# For Mail-in-a-Box
+# Fail2Ban configuration file for Mail-in-a-Box
+
 [DEFAULT]
+# Whitelist our own IP addresses. 127.0.0.1/8 is the default. But our status checks
+# ping services over the public interface so we should whitelist that address of
+# ours too. The string is substituted during installation.
+ignoreip = 127.0.0.1/8 PUBLIC_IP
 
-# bantime in seconds
-bantime  = 60
-
-# This should ban dumb brute-force attacks, not oblivious users.
-findtime = 30
-maxretry = 20
-
-#
 # JAILS
-#
 
 [ssh]
-
-enabled  = true
-logpath  = /var/log/auth.log
-maxretry = 20
+maxretry = 7
+bantime = 3600
 
 [ssh-ddos]
-
 enabled  = true
-maxretry = 20
 
 [sasl]
-
 enabled  = true
 
 [dovecot]
-
 enabled = true
 filter  = dovecotimap
+findtime = 30
+maxretry = 20
+
+[recidive]
+enabled  = true
+maxretry = 10

@@ -1,6 +1,10 @@
 import os.path
 
-CONF_DIR = os.path.join(os.path.dirname(__file__), "../conf")
+# DO NOT import non-standard modules. This module is imported by
+# migrate.py which runs on fresh machines before anything is installed
+# besides Python.
+
+# THE ENVIRONMENT FILE AT /etc/mailinabox.conf
 
 def load_environment():
     # Load settings from /etc/mailinabox.conf.
@@ -18,38 +22,78 @@ def save_environment(env):
         for k, v in env.items():
             f.write("%s=%s\n" % (k, v))
 
+# THE SETTINGS FILE AT STORAGE_ROOT/settings.yaml.
+
+def write_settings(config, env):
+    import rtyaml
+    fn = os.path.join(env['STORAGE_ROOT'], 'settings.yaml')
+    with open(fn, "w") as f:
+        f.write(rtyaml.dump(config))
+
+def load_settings(env):
+    import rtyaml
+    fn = os.path.join(env['STORAGE_ROOT'], 'settings.yaml')
+    try:
+        config = rtyaml.load(open(fn, "r"))
+        if not isinstance(config, dict): raise ValueError() # caught below
+        return config
+    except:
+        return { }
+
+# UTILITIES
+
 def safe_domain_name(name):
     # Sanitize a domain name so it is safe to use as a file name on disk.
     import urllib.parse
     return urllib.parse.quote(name, safe='')
 
 def sort_domains(domain_names, env):
-    # Put domain names in a nice sorted order. For web_update, PRIMARY_HOSTNAME
-    # must appear first so it becomes the nginx default server.
-    
-    # First group PRIMARY_HOSTNAME and its subdomains, then parent domains of PRIMARY_HOSTNAME, then other domains.
-    groups = ( [], [], [] )
-    for d in domain_names:
-        if d == env['PRIMARY_HOSTNAME'] or d.endswith("." + env['PRIMARY_HOSTNAME']):
-            groups[0].append(d)
-        elif env['PRIMARY_HOSTNAME'].endswith("." + d):
-            groups[1].append(d)
+    # Put domain names in a nice sorted order.
+
+    # The nice order will group domain names by DNS zone, i.e. the top-most
+    # domain name that we serve that ecompasses a set of subdomains. Map
+    # each of the domain names to the zone that contains them. Walk the domains
+    # from shortest to longest since zones are always shorter than their
+    # subdomains.
+    zones = { }
+    for domain in sorted(domain_names, key=lambda d : len(d)):
+        for z in zones.values():
+            if domain.endswith("." + z):
+                # We found a parent domain already in the list.
+                zones[domain] = z
+                break
         else:
-            groups[2].append(d)
+            # 'break' did not occur: there is no parent domain, so it is its
+            # own zone.
+            zones[domain] = domain
 
-    # Within each group, sort parent domains before subdomains and after that sort lexicographically.
-    def sort_group(group):
-        # Find the top-most domains.
-        top_domains = sorted(d for d in group if len([s for s in group if d.endswith("." + s)]) == 0)
-        ret = []
-        for d in top_domains:
-            ret.append(d)
-            ret.extend( sort_group([s for s in group if s.endswith("." + d)]) )
-        return ret
-        
-    groups = [sort_group(g) for g in groups]
+    # Sort the zones.
+    zone_domains = sorted(zones.values(),
+      key = lambda d : (
+        # PRIMARY_HOSTNAME or the zone that contains it is always first.
+        not (d == env['PRIMARY_HOSTNAME'] or env['PRIMARY_HOSTNAME'].endswith("." + d)),
 
-    return groups[0] + groups[1] + groups[2]
+        # Then just dumb lexicographically.
+        d,
+      ))
+
+    # Now sort the domain names that fall within each zone.
+    domain_names = sorted(domain_names,
+      key = lambda d : (
+        # First by zone.
+        zone_domains.index(zones[d]),
+
+        # PRIMARY_HOSTNAME is always first within the zone that contains it.
+        d != env['PRIMARY_HOSTNAME'],
+
+        # Followed by any of its subdomains.
+        not d.endswith("." + env['PRIMARY_HOSTNAME']),
+
+        # Then in right-to-left lexicographic order of the .-separated parts of the name.
+        list(reversed(d.split("."))),
+      ))
+    
+    return domain_names
 
 def sort_email_addresses(email_addresses, env):
     email_addresses = set(email_addresses)
@@ -200,3 +244,18 @@ def wait_for_service(port, public, env, timeout):
 			if time.perf_counter() > start+timeout:
 				return False
 		time.sleep(min(timeout/4, 1))
+
+def fix_boto():
+	# Google Compute Engine instances install some Python-2-only boto plugins that
+	# conflict with boto running under Python 3. Disable boto's default configuration
+	# file prior to importing boto so that GCE's plugin is not loaded:
+	import os
+	os.environ["BOTO_CONFIG"] = "/etc/boto3.cfg"
+
+
+if __name__ == "__main__":
+	from web_update import get_web_domains
+	env = load_environment()
+	domains = get_web_domains(env)
+	for domain in domains:
+		print(domain)

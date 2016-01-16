@@ -7,57 +7,80 @@ source /etc/mailinabox.conf # load global vars
 
 # ### Installing ownCloud
 
+echo "Installing ownCloud (contacts/calendar)..."
+
 apt_install \
 	dbconfig-common \
 	php5-cli php5-sqlite php5-gd php5-imap php5-curl php-pear php-apc curl libapr1 libtool libcurl4-openssl-dev php-xml-parser \
-	php5 php5-dev php5-gd php5-fpm memcached php5-memcache unzip
+	php5 php5-dev php5-gd php5-fpm memcached php5-memcached unzip
 
 apt-get purge -qq -y owncloud*
 
 # Install ownCloud from source of this version:
-owncloud_ver=8.0.3
-owncloud_hash=3192f3d783f81247eaf2914df63afdd593def4e5
+owncloud_ver=8.1.1
+owncloud_hash=34077e78575a3e689825a00964ee37fbf83fbdda
+
+# Migrate <= v0.10 setups that stored the ownCloud config.php in /usr/local rather than
+# in STORAGE_ROOT. Move the file to STORAGE_ROOT.
+if [ ! -f $STORAGE_ROOT/owncloud/config.php ] \
+	&& [ -f /usr/local/lib/owncloud/config/config.php ]; then
+
+	# Move config.php and symlink back into previous location.
+	echo "Migrating owncloud/config.php to new location."
+	mv /usr/local/lib/owncloud/config/config.php $STORAGE_ROOT/owncloud/config.php \
+		&& \
+	ln -sf $STORAGE_ROOT/owncloud/config.php /usr/local/lib/owncloud/config/config.php
+fi
 
 # Check if ownCloud dir exist, and check if version matches owncloud_ver (if either doesn't - install/upgrade)
 if [ ! -d /usr/local/lib/owncloud/ ] \
 	|| ! grep -q $owncloud_ver /usr/local/lib/owncloud/version.php; then
 
+	# Download and verify
+	wget_verify https://download.owncloud.org/community/owncloud-$owncloud_ver.zip $owncloud_hash /tmp/owncloud.zip
+
 	# Clear out the existing ownCloud.
-	rm -f /tmp/owncloud-config.php
-	if [ ! -d /usr/local/lib/owncloud/ ]; then
-		echo installing ownCloud...
-	else
+	if [ -d /usr/local/lib/owncloud/ ]; then
 		echo "upgrading ownCloud to $owncloud_ver (backing up existing ownCloud directory to /tmp/owncloud-backup-$$)..."
-		cp /usr/local/lib/owncloud/config/config.php /tmp/owncloud-config.php
 		mv /usr/local/lib/owncloud /tmp/owncloud-backup-$$
 	fi
 
-	# Download and extract ownCloud.
-	wget_verify https://download.owncloud.org/community/owncloud-$owncloud_ver.zip $owncloud_hash /tmp/owncloud.zip
+	# Extract ownCloud
 	unzip -u -o -q /tmp/owncloud.zip -d /usr/local/lib #either extracts new or replaces current files
 	rm -f /tmp/owncloud.zip
 
 	# The two apps we actually want are not in ownCloud core. Clone them from
 	# their github repositories.
 	mkdir -p /usr/local/lib/owncloud/apps
-	git_clone https://github.com/owncloud/contacts v$owncloud_ver '' /usr/local/lib/owncloud/apps/contacts
-	git_clone https://github.com/owncloud/calendar v$owncloud_ver '' /usr/local/lib/owncloud/apps/calendar
+	git_clone https://github.com/owncloud/contacts 4ff855e7c2075309041bead09fbb9eb7df678244 '' /usr/local/lib/owncloud/apps/contacts
+	git_clone https://github.com/owncloud/calendar ec53139b144c0f842c33813305612e8006c42ea5 '' /usr/local/lib/owncloud/apps/calendar
 
 	# Fix weird permissions.
 	chmod 750 /usr/local/lib/owncloud/{apps,config}
 
-	# Restore configuration file if we're doing an upgrade.
-	if [ -f /tmp/owncloud-config.php ]; then
-		mv /tmp/owncloud-config.php /usr/local/lib/owncloud/config/config.php
-	fi
+	# Create a symlink to the config.php in STORAGE_ROOT (for upgrades we're restoring the symlink we previously
+	# put in, and in new installs we're creating a symlink and will create the actual config later).
+	ln -sf $STORAGE_ROOT/owncloud/config.php /usr/local/lib/owncloud/config/config.php
 
 	# Make sure permissions are correct or the upgrade step won't run.
 	# $STORAGE_ROOT/owncloud may not yet exist, so use -f to suppress
 	# that error.
 	chown -f -R www-data.www-data $STORAGE_ROOT/owncloud /usr/local/lib/owncloud
 
-	# Run the upgrade script (if ownCloud is already up-to-date it wont matter).
-	hide_output sudo -u www-data php /usr/local/lib/owncloud/occ upgrade
+	# If this isn't a new installation, immediately run the upgrade script.
+	# Then check for success (0=ok and 3=no upgrade needed, both are success).
+	if [ -f $STORAGE_ROOT/owncloud/owncloud.db ]; then
+		# ownCloud 8.1.1 broke upgrades. It may fail on the first attempt, but
+		# that can be OK.
+		sudo -u www-data php /usr/local/lib/owncloud/occ upgrade
+		if [ \( $? -ne 0 \) -a \( $? -ne 3 \) ]; then
+			echo "Trying ownCloud upgrade again to work around ownCloud upgrade bug..."
+			sudo -u www-data php /usr/local/lib/owncloud/occ upgrade
+			if [ \( $? -ne 0 \) -a \( $? -ne 3 \) ]; then exit 1; fi
+			sudo -u www-data php /usr/local/lib/owncloud/occ maintenance:mode --off
+			echo "...which seemed to work."
+		fi
+	fi
 fi
 
 # ### Configuring ownCloud
@@ -65,29 +88,30 @@ fi
 # Setup ownCloud if the ownCloud database does not yet exist. Running setup when
 # the database does exist wipes the database and user data.
 if [ ! -f $STORAGE_ROOT/owncloud/owncloud.db ]; then
-	# Create a configuration file.
+	# Create user data directory
+	mkdir -p $STORAGE_ROOT/owncloud
+
+	# Create an initial configuration file.
 	TIMEZONE=$(cat /etc/timezone)
 	instanceid=oc$(echo $PRIMARY_HOSTNAME | sha1sum | fold -w 10 | head -n 1)
-	cat > /usr/local/lib/owncloud/config/config.php <<EOF;
+	cat > $STORAGE_ROOT/owncloud/config.php <<EOF;
 <?php
 \$CONFIG = array (
   'datadirectory' => '$STORAGE_ROOT/owncloud',
 
   'instanceid' => '$instanceid',
 
-  'trusted_domains' => 
-    array (
-      0 => '$PRIMARY_HOSTNAME',
-    ),
   'forcessl' => true, # if unset/false, ownCloud sends a HSTS=0 header, which conflicts with nginx config
 
   'overwritewebroot' => '/cloud',
+  'overwrite.cli.url' => '/cloud',
   'user_backends' => array(
     array(
       'class'=>'OC_User_IMAP',
       'arguments'=>array('{localhost:993/imap/ssl/novalidate-cert}')
     )
   ),
+  'memcache.local' => '\\OC\\Memcache\\Memcached',
   "memcached_servers" => array (
     array('localhost', 11211),
   ),
@@ -109,7 +133,7 @@ EOF
 	# Create an auto-configuration file to fill in database settings
 	# when the install script is run. Make an administrator account
 	# here or else the install can't finish.
-	adminpassword=$(dd if=/dev/random bs=1 count=40 2>/dev/null | sha1sum | fold -w 30 | head -n 1)
+	adminpassword=$(dd if=/dev/urandom bs=1 count=40 2>/dev/null | sha1sum | fold -w 30 | head -n 1)
 	cat > /usr/local/lib/owncloud/config/autoconfig.php <<EOF;
 <?php
 \$AUTOCONFIG = array (
@@ -125,14 +149,38 @@ EOF
 ?>
 EOF
 
-	# Create user data directory and set permissions
-	mkdir -p $STORAGE_ROOT/owncloud
+	# Set permissions
 	chown -R www-data.www-data $STORAGE_ROOT/owncloud /usr/local/lib/owncloud
 
 	# Execute ownCloud's setup step, which creates the ownCloud sqlite database.
-	# It also wipes it if it exists. And it deletes the autoconfig.php file.
+	# It also wipes it if it exists. And it updates config.php with database
+	# settings and deletes the autoconfig.php file.
 	(cd /usr/local/lib/owncloud; sudo -u www-data php /usr/local/lib/owncloud/index.php;)
 fi
+
+# Update config.php.
+# * trusted_domains is reset to localhost by autoconfig starting with ownCloud 8.1.1,
+#   so set it here. It also can change if the box's PRIMARY_HOSTNAME changes, so
+#   this will make sure it has the right value.
+# * Some settings weren't included in previous versions of Mail-in-a-Box.
+# Use PHP to read the settings file, modify it, and write out the new settings array.
+CONFIG_TEMP=$(/bin/mktemp)
+php <<EOF > $CONFIG_TEMP && mv $CONFIG_TEMP $STORAGE_ROOT/owncloud/config.php;
+<?php
+include("$STORAGE_ROOT/owncloud/config.php");
+
+\$CONFIG['trusted_domains'] = array('$PRIMARY_HOSTNAME');
+
+\$CONFIG['memcache.local'] = '\\OC\\Memcache\\Memcached';
+\$CONFIG['overwrite.cli.url'] = '/cloud';
+\$CONFIG['mail_from_address'] = 'administrator'; # just the local part, matches our master administrator address
+
+echo "<?php\n\\\$CONFIG = ";
+var_export(\$CONFIG);
+echo ";";
+?>
+EOF
+chown www-data.www-data $STORAGE_ROOT/owncloud/config.php
 
 # Enable/disable apps. Note that this must be done after the ownCloud setup.
 # The firstrunwizard gave Josh all sorts of problems, so disabling that.
@@ -142,6 +190,12 @@ hide_output sudo -u www-data php /usr/local/lib/owncloud/console.php app:disable
 hide_output sudo -u www-data php /usr/local/lib/owncloud/console.php app:enable user_external
 hide_output sudo -u www-data php /usr/local/lib/owncloud/console.php app:enable contacts
 hide_output sudo -u www-data php /usr/local/lib/owncloud/console.php app:enable calendar
+
+# When upgrading, run the upgrade script again now that apps are enabled. It seems like
+# the first upgrade at the top won't work because apps may be disabled during upgrade?
+# Check for success (0=ok, 3=no upgrade needed).
+sudo -u www-data php /usr/local/lib/owncloud/occ upgrade
+if [ \( $? -ne 0 \) -a \( $? -ne 3 \) ]; then exit 1; fi
 
 # Set PHP FPM values to support large file uploads
 # (semicolon is the comment character in this file, hashes produce deprecation warnings)

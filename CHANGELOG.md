@@ -1,6 +1,205 @@
 CHANGELOG
 =========
 
+In Development
+--------------
+
+Mail:
+
+* The Sieve port is now open so tools like the Thunderbird Sieve program can be used to edit mail filters.
+
+Control Panel:
+
+* The SSL (now "TLS") certificates page now supports provisioning free SSL certificates from Let's Encrypt.
+* Report free memory usage.
+* Fix a crash when the git directory is not checked out to a tag.
+
+System:
+
+* The daily backup will now email the administrator if there is a problem.
+* Expiring TLS (SSL) certificates are now automatically renewed via Let's Encrypt.
+* File ownership for the installed Roundcube files is fixed.
+
+v0.15a (January 9, 2016)
+------------------------
+
+Mail:
+
+* Sending mail through Exchange/ActiveSync (Z-Push) had been broken since v0.14. This is now fixed.
+
+v0.15 (January 1, 2016)
+-----------------------
+
+Mail:
+
+* Updated Roundcube to version 1.1.3.
+* Auto-create aliases for abuse@, as required by RFC2142.
+* The DANE TLSA record is changed to use the certificate subject public key rather than the whole certificate, which means the record remains valid after certificate changes (so long as the private key remains the same, which it does for us).
+
+Control panel:
+
+* When IPv6 is enabled, check that system services are accessible over IPv6 too, that the box's hostname resolves over IPv6, and that reverse DNS is setup correctly for IPv6.
+* Explanatory text for setting up secondary nameserver is added/fixed.
+* DNS checks now have a timeout in case a DNS server is not responding, so the checks don't stall indefinitely.
+* Better messages if external DNS is used and, weirdly, custom secondary nameservers are set.
+* Add POP to the mail client settings documentation.
+* The box's IP address is added to the fail2ban whitelist so that the status checks don't trigger the machine banning itself, which results in the status checks showing services down even though they are running.
+* For SSL certificates, rather than asking you what country you are in during setup, ask at the time a CSR is generated. The default system self-signed certificate now omits a country in the subject (it was never needed). The CSR_COUNTRY Mail-in-a-Box setting is dropped entirely.
+
+System:
+
+* Nightly backups and system status checks are now moved to 3am in the system's timezone.
+* fail2ban's recidive jail is now active, which guards against persistent brute force login attacks over long periods of time.
+* Setup (first run only) now asks for your timezone to set the system time.
+* The Exchange/ActiveSync server is now taken offline during nightly backups (along with SMTP and IMAP).
+* The machine's random number generator (/dev/urandom) is now seeded with Ubuntu Pollinate and a blocking read on /dev/random.
+* DNSSEC key generation during install now uses /dev/urandom (instead of /dev/random), which is faster.
+* The $STORAGE_ROOT/ssl directory is flattened by a migration script and the system SSL certificate path is now a symlink to the actual certificate.
+* If ownCloud sends out email, it will use the box's administrative address now (admin@yourboxname).
+* Z-Push (Exchange/ActiveSync) logs now exclude warnings and are now rotated to save disk space.
+* Fix pip command that might have not installed all necessary Python packages.
+* The control panel and backup would not work on Google Compute Engine because GCE installs a conflicting boto package.
+* Added a new command `management/backup.py --restore` to restore files from a backup to a target directory (command line arguments are passed to `duplicity restore`).
+
+v0.14 (November 4, 2015)
+------------------------
+
+Mail:
+
+* Spamassassin's network-based tests (Pyzor, others) and DKIM tests are now enabled. (Pyzor had always been installed but was not active due to a misconfiguration.)
+* Moving spam out of the Spam folder and into Trash would incorrectly train Spamassassin that those messages were not spam.
+* Automatically create the Sent and Archive folders for new users.
+* The HTML5_Notifier plugin for Roundcube is now included, which when turned on in Roundcube settings provides desktop notifications for new mail.
+* The Exchange/ActiveSync backend Z-Push has been updated to fix a problem with CC'd emails not being sent to the CC recipients.
+
+Calender/Contacts:
+
+* CalDAV/CardDAV and Exchange/ActiveSync for calendar/contacts wasn't working in some network configurations.
+
+Web:
+
+* When a new domain is added to the box, rather than applying a new self-signed certificate for that domain, the SSL certificate for the box's primary hostname will be used instead.
+* If a custom DNS record is set on a domain or 'www'+domain, web would not be served for that domain. If the custom DNS record is just the box's IP address, that's a configuration mistake, but allow it and let web continue to be served.
+* Accommodate really long domain names by increasing an nginx setting.
+
+Control panel:
+
+* Added an option to check for new Mail-in-a-Box versions within status checks. It is off by default so that boxes don't "phone home" without permission.
+* Added a random password generator on the users page to simplify creating new accounts.
+* When S3 backup credentials are set, the credentials are now no longer ever sent back from the box to the client, for better security.
+* Fixed the jumpiness when a modal is displayed.
+* Focus is put into the login form fields when the login form is displayed.
+* Status checks now include a warning if a custom DNS record has been set on a domain that would normally serve web and as a result that domain no longer is serving web.
+* Status checks now check that secondary nameservers, if specified, are actually serving the domains.
+* Some errors in the control panel when there is invalid data in the database or an improperly named archived user account have been suppressed.
+* Added subresource integrity attributes to all remotely-sourced resources (i.e. via CDNs) to guard against CDNs being used as an attack vector.
+
+System:
+
+* Tweaks to fail2ban settings.
+* Fixed a spurrious warning while installing munin.
+
+v0.13b (August 30, 2015)
+------------------------
+
+Another ownCloud 8.1.1 issue was found. New installations left ownCloud improperly setup ("You are accessing the server from an untrusted domain."). Upgrading to this version will fix that.
+
+v0.13a (August 23, 2015)
+------------------------
+
+Note: v0.13 (no 'a', August 19, 2015) was pulled immediately due to an ownCloud bug that prevented upgrades. v0.13a works around that problem.
+
+Mail:
+
+* Outbound mail headers (the Recieved: header) are tweaked to possibly improve deliverability.
+* Some MIME messages would hang Roundcube due to a missing package.
+* The users permitted to send as an alias can now be different from where an alias forwards to.
+
+DNS:
+
+* The secondary nameservers option in the control panel now accepts more than one nameserver and a special xfr:IP format to specify zone-transfer-only IP addresses.
+* A TLSA record is added for HTTPS for DNSSEC-aware clients that support it.
+
+System:
+
+* Backups can now be turned off, or stored in Amazon S3, through new control panel options.
+* Munin was not working on machines confused about their hostname and had lots of errors related to PANGO, NTP peers and network interfaces that were not up.
+* ownCloud updated to version 8.1.1 (with upgrade work-around), its memcached caching enabled.
+* When upgrading, network checks like blocked port 25 are now skipped.
+* Tweaks to the intrusion detection rules for IMAP.
+* Mail-in-a-Box's setup is a lot quieter, hiding lots of irrelevant messages.
+
+Control panel:
+
+* SSL certificate checks were failing on OVH/OpenVZ servers due to missing /dev/stdin.
+* Improve the sort order of the domains in the status checks.
+* Some links in the control panel were only working in Chrome.
+
+v0.12c (July 19, 2015)
+----------------------
+
+v0.12c was posted to work around the current Sourceforge.net outage: pyzor's remote server is now hard-coded rather than accessing a file hosted on Sourceforge, and roundcube is now downloaded from a Mail-in-a-Box mirror rather than from Sourceforge.
+
+v0.12b (July 4, 2015)
+---------------------
+
+This version corrects a minor regression in v0.12 related to creating aliases targetting multiple addresses.
+
+v0.12 (July 3, 2015)
+--------------------
+
+This is a minor update to v0.11, which was a major update. Please read v0.11's advisories.
+
+* The administrator@ alias was incorrectly created starting with v0.11. If your first install was v0.11, check that the administrator@ alias forwards mail to you.
+* Intrusion detection rules (fail2ban) are relaxed (i.e. less is blocked).
+* SSL certificates could not be installed for the new automatic 'www.' redirect domains.
+* PHP's default character encoding is changed from no default to UTF8. The effect of this change is unclear but should prevent possible future text conversion issues.
+* User-installed SSL private keys in the BEGIN PRIVATE KEY format were not accepted.
+* SSL certificates with SAN domains with IDNA encoding were broken in v0.11.
+* Some IDNA functionality was using IDNA 2003 rather than IDNA 2008.
+
+v0.11b (June 29, 2015)
+----------------------
+
+v0.11b was posted shortly after the initial posting of v0.11 to correct a missing dependency for the new PPA.
+
+v0.11 (June 29, 2015)
+---------------------
+
+Advisories:
+* Users can no longer spoof arbitrary email addresses in outbound mail. When sending mail, the email address configured in your mail client must match the SMTP login username being used, or the email address must be an alias with the SMTP login username listed as one of the alias's targets.
+* This update replaces your DKIM signing key with a stronger key. Because of DNS caching/propagation, mail sent within a few hours after this update could be marked as spam by recipients. If you use External DNS, you will need to update your DNS records.
+* The box will now install software from a new Mail-in-a-Box PPA on Launchpad.net, where we are distributing two of our own packages: a patched postgrey and dovecot-lucene.
+
+Mail:
+* Greylisting will now let some reputable senders pass through immediately.
+* Searching mail (via IMAP) will now be much faster using the dovecot lucene full text search plugin.
+* Users can no longer spoof arbitrary email addresses in outbound mail (see above).
+* Fix for deleting admin@ and postmaster@ addresses.
+* Roundcube is updated to version 1.1.2, plugins updated.
+* Exchange/ActiveSync autoconfiguration was not working on all devices (e.g. iPhone) because of a case-sensitive URL.
+* The DKIM signing key has been increased to 2048 bits, from 1024, replacing the existing key.
+
+Web:
+* 'www' subdomains now automatically redirect to their parent domain (but you'll need to install an SSL certificate).
+* OCSP no longer uses Google Public DNS.
+* The installed PHP version is no longer exposed through HTTP response headers, for better security.
+
+DNS:
+* Default IPv6 AAAA records were missing since version 0.09.
+
+Control panel:
+* Resetting a user's password now forces them to log in again everywhere.
+* Status checks were not working if an ssh server was not installed.
+* SSL certificate validation now uses the Python cryptography module in some places where openssl was used.
+* There is a new tab to show the installed version of Mail-in-a-Box and to fetch the latest released version.
+
+System:
+* The munin system monitoring tool is now installed and accessible at /admin/munin.
+* ownCloud updated to version 8.0.4. The ownCloud installation step now is reslient to download problems. The ownCloud configuration file is now stored in STORAGE_ROOT to fix loss of data when moving STORAGE_ROOT to a new machine.
+* The setup scripts now run `apt-get update` prior to installing anything to ensure the apt database is in sync with the packages actually available.
+
+
 v0.10 (June 1, 2015)
 --------------------
 
@@ -231,7 +430,7 @@ v0.02 (September 21, 2014)
 * Better logic for determining when to take a full backup.
 * Reduce DNS TTL, not that it seems to really matter.
 * Add SSHFP DNS records.
-* Add an API for setting custom DNS records 
+* Add an API for setting custom DNS records
 * Update to ownCloud 7.0.2.
 * Some things were broken if the machine had an IPv6 address.
 * Use a dialogs library to ask users questions during setup.

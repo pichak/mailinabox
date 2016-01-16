@@ -24,7 +24,7 @@ The Box
 
 Mail-in-a-Box turns a fresh Ubuntu 14.04 LTS 64-bit machine into a working mail server by installing and configuring various components.
 
-It is a one-click email appliance (see the [setup guide](https://mailinabox.email/guide.html)). There are no user-configurable setup options. It "just works".
+It is a one-click email appliance. There are no user-configurable setup options. It "just works".
 
 The components installed are:
 
@@ -32,35 +32,55 @@ The components installed are:
 * Webmail ([Roundcube](http://roundcube.net/)), static website hosting ([nginx](http://nginx.org/))
 * Spam filtering ([spamassassin](https://spamassassin.apache.org/)), greylisting ([postgrey](http://postgrey.schweikert.ch/))
 * DNS ([nsd4](http://www.nlnetlabs.nl/projects/nsd/)) with [SPF](https://en.wikipedia.org/wiki/Sender_Policy_Framework), DKIM ([OpenDKIM](http://www.opendkim.org/)), [DMARC](https://en.wikipedia.org/wiki/DMARC), [DNSSEC](https://en.wikipedia.org/wiki/DNSSEC), [DANE TLSA](https://en.wikipedia.org/wiki/DNS-based_Authentication_of_Named_Entities), and [SSHFP](https://tools.ietf.org/html/rfc4255) records automatically set
-* Firewall ([ufw](https://launchpad.net/ufw)), intrusion protection ([fail2ban](http://www.fail2ban.org/wiki/index.php/Main_Page))
-* A control panel and API for adding/removing mail users, aliases, custom DNS records, etc. and system monitoring.
+* Backups ([duplicity](http://duplicity.nongnu.org/)), firewall ([ufw](https://launchpad.net/ufw)), intrusion protection ([fail2ban](http://www.fail2ban.org/wiki/index.php/Main_Page)), system monitoring ([munin](http://munin-monitoring.org/))
+
+It also includes:
+
+* A control panel and API for adding/removing mail users, aliases, custom DNS records, etc. and detailed system monitoring.
+* Our own builds of postgrey (adding better whitelisting) and dovecot-lucene (faster search for mail) distributed via the [Mail-in-a-Box PPA](https://launchpad.net/~mail-in-a-box/+archive/ubuntu/ppa) on Launchpad.
 
 For more information on how Mail-in-a-Box handles your privacy, see the [security details page](security.md).
 
-The Security
+Installation
 ------------
 
-See the [security guide](security.md) for more information about the box's security configuration (TLS, password storage, etc).
+See the [setup guide](https://mailinabox.email/guide.html) for detailed, user-friendly instructions.
 
-I sign the release tags on git. To verify that a tag is signed by me, you can perform the following steps:
+For experts, start with a completely fresh (really, I mean it) Ubuntu 14.04 LTS 64-bit machine. On the machine...
 
-	# Download my PGP key.
-	$ curl -s https://keybase.io/joshdata/key.asc | gpg --import
-	gpg: key C10BDD81: public key "Joshua Tauberer <jt@occams.info>" imported
+Clone this repository:
 
-	# Clone this repository.
 	$ git clone https://github.com/mail-in-a-box/mailinabox
 	$ cd mailinabox
 
-	# Verify the tag.
-	$ git verify-tag v0.10
+_Optional:_ Download my PGP key and then verify that the sources were signed
+by me:
+
+	$ curl -s https://keybase.io/joshdata/key.asc | gpg --import
+	gpg: key C10BDD81: public key "Joshua Tauberer <jt@occams.info>" imported
+
+	$ git verify-tag v0.15a
 	gpg: Signature made ..... using RSA key ID C10BDD81
 	gpg: Good signature from "Joshua Tauberer <jt@occams.info>"
 	gpg: WARNING: This key is not certified with a trusted signature!
 	gpg:          There is no indication that the signature belongs to the owner.
 	Primary key fingerprint: 5F4C 0E73 13CC D744 693B  2AEA B920 41F4 C10B DD81
 
-The key ID and fingerprint above should match my [Keybase.io key](https://keybase.io/joshdata) and the fingerprint I publish on [my homepage](https://razor.occams.info/).
+You'll get a lot of warnings, but that's OK. Check that the primary key fingerprint matchs the
+fingerprint in the key details at [https://keybase.io/joshdata](https://keybase.io/joshdata)
+and on my [personal homepage](https://razor.occams.info/). (Of course, if this repository has been compromised you can't trust these instructions.)
+
+Checkout the tag corresponding to the most recent release:
+
+	$ git checkout v0.15a
+
+Begin the installation.
+
+	$ sudo setup/start.sh
+
+For help, DO NOT contact me directly --- I don't do tech support by email or tweet (no exceptions).
+
+Post your question on the [discussion forum](https://discourse.mailinabox.email/) instead, where me and other Mail-in-a-Box users may be able to help you.
 
 The Acknowledgements
 --------------------
@@ -76,3 +96,4 @@ The History
 * In August 2013 I began Mail-in-a-Box by combining my own mail server configuration with the setup in ["NSA-proof your email in 2 hours"](http://sealedabstract.com/code/nsa-proof-your-e-mail-in-2-hours/) and making the setup steps reproducible with bash scripts.
 * Mail-in-a-Box was a semifinalist in the 2014 [Knight News Challenge](https://www.newschallenge.org/challenge/2014/submissions/mail-in-a-box), but it was not selected as a winner.
 * Mail-in-a-Box hit the front page of Hacker News in [April](https://news.ycombinator.com/item?id=7634514) 2014, [September](https://news.ycombinator.com/item?id=8276171) 2014, and [May](https://news.ycombinator.com/item?id=9624267) 2015.
+* FastCompany mentioned Mail-in-a-Box a [roundup of privacy projects](http://www.fastcompany.com/3047645/your-own-private-cloud) on June 26, 2015.
